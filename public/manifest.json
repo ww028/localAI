@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "localAI",
+  "description": "Chrome Built-in AI playground for browser-local model experiments.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "localAI",
+    "default_popup": "index.html"
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["sidePanel", "offscreen"],
+  "minimum_chrome_version": "138"
+}
