@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "name": "localAI knowledge retrieval baseline",
+  "description": "A small baseline set for manually checking whether localAI retrieves the expected local knowledge chunks before answer generation.",
+  "documents": [
+    {
+      "path": "examples/localai-knowledge-demo.md",
+      "name": "localai-knowledge-demo.md",
+      "space": "个人资料"
+    }
+  ],
+  "cases": [
+    {
+      "id": "privacy-local-documents",
+      "query": "localAI 是否会上传我的文档？",
+      "expectedHits": [
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "常见问题 / localAI 会上传我的文档吗？",
+          "mustAppearInSnippet": ["不会", "IndexedDB", "本地完成"]
+        },
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "产品定位",
+          "mustAppearInSnippet": ["数据尽量留在本机", "减少对云端模型"]
+        }
+      ],
+      "expectedAnswerPoints": [
+        "回答应说明文档内容默认保存在浏览器 IndexedDB 中。",
+        "回答应说明检索在本地完成。",
+        "回答不应声称文档会上传到云端模型或外部 API。"
+      ]
+    },
+    {
+      "id": "background-inference",
+      "query": "为什么 popup 关闭后 AI 还能继续运行？",
+      "expectedHits": [
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "后台执行机制",
+          "mustAppearInSnippet": ["popup 页面会被销毁", "background service worker", "offscreen document"]
+        }
+      ],
+      "expectedAnswerPoints": [
+        "回答应说明 popup 关闭后页面会销毁，因此不能只在 popup 内执行推理。",
+        "回答应提到 background service worker 负责转发或调度任务。",
+        "回答应提到 offscreen document 承载 Chrome Built-in AI 调用。"
+      ]
+    },
+    {
+      "id": "supported-file-types",
+      "query": "localAI 当前支持哪些知识库文件格式？",
+      "expectedHits": [
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "支持的文件类型",
+          "mustAppearInSnippet": [".md", ".txt", ".pdf", ".docx"]
+        }
+      ],
+      "expectedAnswerPoints": [
+        "回答应说明 .md 和 .txt 当前支持。",
+        "回答应说明 PDF、DOCX 和图片暂不支持。",
+        "回答应避免把后续规划说成已支持能力。"
+      ]
+    },
+    {
+      "id": "embedding-retrieval",
+      "query": "本地知识库如何使用 embedding 检索？",
+      "expectedHits": [
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "本地知识库机制",
+          "mustAppearInSnippet": ["embedding 向量检索", "关键词评分", "余弦相似度"]
+        }
+      ],
+      "expectedAnswerPoints": [
+        "回答应说明导入文档会被拆分成文本片段。",
+        "回答应说明每个片段会生成本地向量并保存到 IndexedDB。",
+        "回答应说明查询会生成向量并通过余弦相似度检索相关片段。",
+        "回答应提到关键词评分作为兜底。"
+      ]
+    },
+    {
+      "id": "chrome-ai-language-limits",
+      "query": "Chrome Built-in AI 的语言声明有什么限制？",
+      "expectedHits": [
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "Chrome Built-in AI 使用限制",
+          "mustAppearInSnippet": ["Prompt API", "en", "es", "ja", "语言声明"]
+        }
+      ],
+      "expectedAnswerPoints": [
+        "回答应说明部分 Chrome Prompt API 版本的声明语言有限。",
+        "回答应说明中文提问时也可能需要使用英文输出语言声明来通过校验。",
+        "回答应区分 API 语言声明限制和模型实际中文生成能力。"
+      ]
+    },
+    {
+      "id": "citation-purpose",
+      "query": "为什么回答里会出现引用编号？",
+      "expectedHits": [
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "常见问题 / 为什么回答里会出现引用编号？",
+          "mustAppearInSnippet": ["[1]", "[2]", "用户可以知道回答依据"]
+        }
+      ],
+      "expectedAnswerPoints": [
+        "回答应说明引用编号对应检索到的本地知识片段。",
+        "回答应说明引用编号用于帮助用户判断答案依据。",
+        "回答应避免把引用编号解释成外部网页引用。"
+      ]
+    },
+    {
+      "id": "exact-fact-zhangsan",
+      "query": "张三是谁？",
+      "expectedHits": [
+        {
+          "documentName": "localai-knowledge-demo.md",
+          "section": "张三是谁？",
+          "mustAppearInSnippet": ["张三是一条狗"]
+        }
+      ],
+      "expectedAnswerPoints": [
+        "回答应直接说明张三是一条狗。",
+        "回答不应补充知识库之外的身份信息。"
+      ]
+    }
+  ]
+}

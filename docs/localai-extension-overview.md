@@ -1,251 +1,484 @@
-# localAI Chrome 插件实现与能力总览
+# localAI Chrome 插件技术架构与功能自测
 
-## 为什么先写成一篇文章
+## 项目定位
 
-当前 localAI 仍处在 MVP 到可用原型之间，功能模块之间耦合较强：Chrome Built-in AI 调用、本地知识库、会话持久化、后台执行和 Popup UI 都服务于同一个目标，也就是让用户在浏览器里完成本地优先的 AI 问答。
+localAI 是一个 Chrome Manifest V3 插件，目标是把 Chrome Built-in AI 能力包装成一个本地优先的个人助手。
 
-因此现阶段更适合写成一篇完整文章。读者可以顺着“产品目标 - 技术实现 - 功能价值 - 使用结果 - 当前限制”连续理解项目。后续如果继续扩展到 PDF 解析、真实模型 embedding、检索评测、权限治理或多知识库空间，再拆成多篇专题文档更合理。
-
-## 产品目标
-
-localAI 是一个 Chrome Manifest V3 插件，用于调用 Chrome Built-in AI，在浏览器本地完成 AI 对话和知识库问答。
-
-它的核心目标不是训练模型，也不是替代云端大模型平台，而是验证一条更轻量、更私密的本地 AI 工作流：
-
-1. 用户在浏览器插件里提问。
-2. 插件在本地知识库中检索相关资料。
-3. 检索到的资料被拼接进 prompt。
-4. Chrome 内置模型在本机完成推理。
-5. 对话和知识文件元数据保存在浏览器 IndexedDB 中。
-
-这条链路的价值在于，用户的文档和问题默认不需要上传到外部服务，适合处理轻量的个人知识、项目说明、产品文档、技术笔记和离线资料问答。
-
-## 当前实现架构
-
-localAI 使用 Vite、React 和 TypeScript 构建插件 UI，插件入口同时支持 toolbar popup 和 Chrome side panel。
-
-核心模块如下：
-
-| 模块 | 位置 | 职责 |
-| --- | --- | --- |
-| Chrome AI 适配层 | `src/lib/chromeAi.ts` | 探测并调用 Chrome Built-in AI API |
-| 对话存储 | `src/lib/conversationStore.ts` | 使用 IndexedDB 保存历史会话、消息和运行状态 |
-| 知识库存储 | `src/lib/knowledgeStore.ts` | 导入文档、切分 chunk、生成 embedding、检索和删除知识文件 |
-| 主界面 | `src/App.tsx` | 对话 UI、知识库入口、历史会话、语言切换和任务提交 |
-| 样式 | `src/styles/main.css` | 固定 Popup 尺寸、无全局滚动、消息和工具栏样式 |
-| 后台任务 | `public/background.js` | 接收 Popup 请求并创建 offscreen 页面 |
-| 后台推理页面 | `public/offscreen.js` | Popup 关闭后继续执行 Prompt API 并写回结果 |
-| 插件声明 | `public/manifest.json` | MV3 配置、popup、side panel、background 和 offscreen 权限 |
-
-整体执行链路如下：
+它不是简单的聊天框。当前实现已经形成一条受控链路：
 
 ```text
-用户提问
-  -> App.tsx 保存用户消息
-  -> knowledgeStore.searchKnowledge() 检索本地知识片段
-  -> buildKnowledgePrompt() 拼接引用上下文
-  -> background.js 转发后台任务
-  -> offscreen.js 调用 Chrome LanguageModel.prompt()
-  -> conversationStore 保存 AI 回复
-  -> Popup 重新打开后恢复最新会话
+用户输入
+  -> 意图识别
+  -> 结构化计划
+  -> 确定性工具 / 知识库 / 记忆执行
+  -> Chrome Built-in AI 负责总结、解释和润色
+  -> 保存会话、引用和任务状态
 ```
+
+核心原则：
+
+- Chrome 内置模型负责理解、生成、解释和润色，不直接承担可靠计算、状态管理和长期记忆。
+- 计算、排序、格式转换、检索、引用、记忆、任务状态和文件解析由确定性代码控制。
+- Prompt 必须分区：助手规则、结构化意图、结构化计划、确定性执行结果、最近会话、个人记忆、本地知识、用户问题。
+- Chrome Built-in AI API 仍处于实验阶段，所有能力都要能 graceful fallback。
+
+## 当前完成度
+
+按 `todo.md`，迭代 1 到迭代 5 已完成：
+
+| 迭代 | 状态 | 重点 |
+| ---- | ---- | ---- |
+| 迭代 1 | 已完成 | Chrome AI 调用、语言 fallback、Prompt 构建、任务状态枚举、最小测试 |
+| 迭代 2 | 已完成 | 结构化个人记忆、记住/忘记、记忆管理 UI |
+| 迭代 3 | 已完成 | 知识库空间、chunk 预览、检索评测样例、重建索引、rerank |
+| 迭代 4 | 已完成 | 当前网页读取、网页摘要/问答/待办/笔记、保存网页到知识库、文本轻量动作 |
+| 迭代 5 | 已完成 | intent、plan、确定性执行、模型润色、taskState 恢复和继续任务 |
+
+当前阶段可以视为个人助手 MVP：核心链路已经成型，下一阶段重点是体验闭环、工具增强、记忆升级、更多文档格式和发布质量。
+
+## 入口和运行形态
+
+插件支持三种入口，三者共用同一个 React 应用：
+
+| 入口 | 实现 | 说明 |
+| ---- | ---- | ---- |
+| Toolbar popup | `index.html` | 固定 `760px x 600px`，适合快速问答 |
+| Chrome side panel | `side_panel.default_path` | 侧边栏常驻，适合边浏览边问 |
+| 新标签页对话 | `index.html?surface=tab` | 大屏对话，适合长任务 |
+
+相关实现：
+
+- `public/manifest.json` 声明 popup、side panel、background、offscreen 和权限。
+- `src/App.tsx` 根据 `surface` 参数切换布局。
+- `public/background.js` 负责打开 side panel、新标签页聚焦和 popup 动态禁用。
+
+自测：
+
+1. 执行 `npm run build`。
+2. 在 `chrome://extensions` 加载 `dist/`。
+3. 点击插件图标，应打开 popup。
+4. 在 popup 顶部点击侧边栏按钮，应打开 side panel 并关闭 popup。
+5. 在 popup 或 side panel 点击新标签页按钮，应打开 `surface=tab` 的全屏对话。
+6. 如果新标签页已打开，再点插件图标，应聚焦已有标签页并出现 toast。
+
+## 核心模块
+
+| 模块 | 位置 | 职责 |
+| ---- | ---- | ---- |
+| 主界面 | `src/App.tsx` | 对话 UI、工具入口、历史、任务提交、状态恢复 |
+| Chrome AI 适配 | `src/lib/chromeAi.ts` | 能力探测、任务调用、专用 API fallback |
+| 会话存储 | `src/lib/conversationStore.ts` | IndexedDB 保存会话、消息、状态和 `taskState` |
+| 个人记忆 | `src/lib/assistantMemoryStore.ts` | 结构化记忆 CRUD、搜索、导出、记住/忘记命令解析 |
+| 意图识别 | `src/lib/assistantIntent.ts` | 基于规则输出结构化 intent |
+| 计划器 | `src/lib/assistantPlanner.ts` | 根据 intent 输出可执行步骤和工具 |
+| 确定性执行器 | `src/lib/assistantDeterministicExecutor.ts` | 计算、排序、格式转换 |
+| Prompt 构建 | `src/lib/assistantPrompt.ts` | 统一组织 intent、plan、执行结果、会话、记忆和知识 |
+| 知识库 | `src/lib/knowledgeStore.ts` | IndexedDB 文档空间、chunk、embedding、rerank、索引重建 |
+| Background | `public/background.js` | MV3 service worker，调度 offscreen、网页读取、入口控制 |
+| Offscreen | `public/offscreen.js` | 后台执行 Chrome Built-in AI，并写回 IndexedDB |
+| 样式 | `src/styles/main.css` | 三种 surface 的响应式布局和交互样式 |
+
+## 主对话执行链路
+
+普通用户问题的执行流程：
+
+```text
+App.tsx
+  -> parseAssistantMemoryCommand()
+  -> searchKnowledge()
+  -> searchAssistantMemories()
+  -> detectAssistantIntent()
+  -> createAssistantPlan()
+  -> executeDeterministicTask()
+  -> buildAssistantPrompt()
+  -> saveConversation(status=queued, taskState=...)
+  -> submitBackgroundTask()
+  -> background.js
+  -> offscreen.js
+  -> runAiTask()
+  -> saveConversation(status=completed/failed)
+```
+
+如果不是 Chrome 扩展环境，或后台任务不可用，`App.tsx` 会回退到前台 `runAiTask()`。
+
+自测：
+
+1. 输入普通问题，例如 `你能做什么？`。
+2. 发送后应出现加载状态。
+3. 关闭 popup 再打开，应恢复最近会话。
+4. 在 DevTools Application IndexedDB 中检查 `local-ai / conversations`，应看到会话消息和状态字段。
 
 ## Chrome Built-in AI 调用
 
-插件通过 `src/lib/chromeAi.ts` 对 Chrome Built-in AI 做统一封装。当前适配的能力包括：
+Chrome AI 调用集中在 `src/lib/chromeAi.ts` 和 `public/offscreen.js`。
+
+当前支持：
 
 | 能力 | Chrome 全局对象 | 用途 |
-| --- | --- | --- |
-| Prompt | `LanguageModel` | 通用问答和知识库增强问答 |
-| Summarizer | `Summarizer` | 文本摘要能力探测和调用 |
-| Translator | `Translator` | 翻译能力探测和调用 |
-| LanguageDetector | `LanguageDetector` | 语言检测能力探测和调用 |
-| Writer | `Writer` | 写作能力探测和调用 |
-| Rewriter | `Rewriter` | 改写能力探测和调用 |
+| ---- | ---- | ---- |
+| Prompt | `LanguageModel` | 主对话、网页助手、fallback |
+| Summarizer | `Summarizer` | 输入区摘要动作 |
+| Translator | `Translator` | 中英互译 |
+| LanguageDetector | `LanguageDetector` | 能力探测和后续语言识别扩展 |
+| Writer | `Writer` | 输入区写作动作 |
+| Rewriter | `Rewriter` | 输入区润色改写动作 |
 
-实际主流程目前使用 `LanguageModel.prompt()` 完成对话。其他 API 已经纳入能力探测和适配层，便于后续把 UI 从单一问答扩展成更多文本任务。
+语言策略：
 
-Chrome AI API 仍处于实验演进阶段，所以项目把直接 API 调用集中在适配层里。这样当 Chrome 改动 factory 名称、`availability()` 参数或 session 方法时，只需要优先修改适配层，不需要让 UI 组件感知底层差异。
+- Prompt API 中文优先：`zh`、`zh-Hans`、`en`、无参数 fallback。
+- 翻译会根据输入自动判断方向：中文默认翻译成英文，英文默认翻译成中文。
+- Rewriter 默认是“润色改写”，目标是更清晰、更自然，尽量保持原意和长度。
 
-## 后台执行机制
+fallback 策略：
 
-Chrome 插件 popup 关闭后，popup 页面会被销毁。如果 AI 推理直接跑在 popup 中，用户关闭插件窗口就会导致任务中断。
+- 专用 API 可用时优先使用，例如 `Translator.translate()`。
+- 专用 API 在 offscreen 不可用时，自动退回 `LanguageModel.prompt()`，使用明确任务提示词完成同等语义。
+- 如果模型不可用，但确定性执行已经成功，界面会直接返回程序执行结果。
 
-localAI 使用 Manifest V3 的 background service worker 和 offscreen document 解决这个问题：
+自测：
 
-1. 用户发送问题后，`App.tsx` 先把当前会话保存为 `running`。
-2. Popup 通过 `chrome.runtime.sendMessage()` 把任务交给 `background.js`。
-3. `background.js` 确保 `offscreen.html` 已创建。
-4. `offscreen.js` 在隐藏页面中调用 `LanguageModel.prompt()`。
-5. 推理完成后，结果写回 IndexedDB。
-6. 用户再次打开 popup 时，界面读取最新会话状态并展示结果。
+1. 打开插件，查看右下角 API 状态标签。
+2. 输入 `测试`，点击 `+ -> 中英互译`，应输出英文。
+3. 输入 `test`，点击 `+ -> 中英互译`，应输出中文。
+4. 输入 `今天是个好日子`，点击 `+ -> 润色改写`，应输出更自然的表达。
+5. 关闭 popup 后重新打开，轻量动作任务不应丢失。
 
-这个设计解决了一个关键体验问题：用户不用一直保持 popup 打开，也不会因为误关闭窗口丢失正在执行的 AI 任务。
+## 后台执行和任务状态
 
-## 本地知识库实现
+MV3 service worker 不是普通页面上下文，Chrome Built-in AI API 不适合直接跑在 service worker 里。localAI 使用 offscreen document 承载后台推理。
 
-localAI 支持导入 `.md` 和 `.txt` 文件作为本地知识库。导入后，文档不会上传到外部服务，而是保存在浏览器 IndexedDB。
+流程：
+
+1. `App.tsx` 先保存会话和 `taskState`，状态为 `queued`。
+2. `background.js` 创建或复用 `offscreen.html`。
+3. `offscreen.js` 创建 Chrome AI session。
+4. offscreen 逐步写回状态：`checking`、`creating-session`、`downloading`、`running`。
+5. 成功后写回 AI 回复，状态变为 `completed`。
+6. 失败后写回错误消息，状态变为 `failed`。
+
+`taskState` 保存：
+
+| 字段 | 说明 |
+| ---- | ---- |
+| `kind` | `chat`、`text-action`、`web-page` |
+| `aiTask` | `prompt`、`summarize`、`translate`、`write`、`rewrite` |
+| `status` | 当前任务状态 |
+| `originalInput` | 用户原始输入或网页任务描述 |
+| `promptText` | 可重新提交的完整 prompt 或文本 |
+| `sources` | 本地知识引用来源 |
+| `intent` | 结构化意图 |
+| `plan` | 结构化计划 |
+| `deterministicExecution` | 确定性执行结果 |
+| `error` | 失败原因 |
+
+自测：
+
+1. 输入一个较长问题，发送后立刻关闭 popup。
+2. 等待几秒后重新打开插件，应看到任务继续或已完成结果。
+3. 在 IndexedDB 的 `local-ai / conversations` 中检查 `taskState.status`。
+4. 人为制造模型不可用或后台失败后，回到会话，应看到任务状态条和“继续任务”按钮。
+5. 点击“继续任务”，应复用保存的 `promptText` 和 `aiTask` 重新提交。
+
+## 结构化个人记忆
+
+个人记忆由 `src/lib/assistantMemoryStore.ts` 管理，存储在独立 IndexedDB：`local-ai-assistant-memory`。
+
+支持类型：
+
+| 类型 | 用途 |
+| ---- | ---- |
+| `preference` | 用户偏好，例如回答风格、语言偏好 |
+| `fact` | 长期事实，例如身份、常用信息 |
+| `project` | 项目约定，例如技术栈、代码规范 |
+| `task` | 任务状态，例如后续要继续的事情 |
+
+能力：
+
+- 输入 `记住 ...` 保存记忆。
+- 输入 `忘记 ...`、`忘掉 ...`、`把 ... 忘掉` 删除相关记忆。
+- 输入区的“个人记忆”入口可查看、编辑、删除、导出记忆。
+- Prompt 构建时只注入和当前问题相关的少量记忆。
+
+自测：
+
+1. 输入 `记住 我的回答风格偏好是简洁直接`。
+2. 打开输入区的“个人记忆”入口，应看到该记忆。
+3. 编辑记忆内容并保存，应立即更新列表。
+4. 输入 `忘掉回答风格偏好`，该记忆应被删除。
+5. 点击导出按钮，应下载 JSON 文件。
+
+## 本地知识库
+
+知识库由 `src/lib/knowledgeStore.ts` 管理，存储在 IndexedDB：`local-ai-knowledge`。
+
+当前支持：
+
+- `.md` 和 `.txt` 文件导入。
+- 多知识空间，例如“个人资料”“项目 A”“项目 B”。
+- 文档和 chunk 都记录 `spaceId`。
+- 检索默认只查当前知识空间。
+- chunk 预览和引用跳转。
+- 当前网页保存到知识库。
+- 当前空间索引重建。
+- 检索评测样例。
 
 导入流程：
 
-1. 用户点击底部 `浏览器知识` chip 选择文件。
-2. `knowledgeStore.importKnowledgeFiles()` 读取文本内容。
-3. 文档按段落切分为多个 chunk。
-4. 每个 chunk 生成关键词 terms 和 embedding 向量。
-5. 文档元数据写入 `documents` store。
-6. chunk、terms 和 embedding 写入 `chunks` store。
+```text
+选择文件
+  -> 读取文本
+  -> 按段落和长度切分 chunk
+  -> 生成 terms
+  -> 生成 embedding
+  -> 写入 documents 和 chunks
+```
 
 检索流程：
 
-1. 用户发送问题。
-2. `searchKnowledge()` 为问题生成 query embedding。
-3. 对所有 chunk 计算 query embedding 与 chunk embedding 的余弦相似度。
-4. 同时计算关键词命中分数作为兜底。
-5. 综合排序后取前 5 个片段。
-6. 检索结果被插入 prompt，并要求模型优先依据本地片段回答。
+```text
+用户问题
+  -> 生成 query terms 和 query embedding
+  -> 当前知识空间内粗召回
+  -> rerank
+  -> 返回 top matches
+  -> 注入 Prompt 并展示引用
+```
 
-当前 embedding 实现采用两层策略：
+embedding 策略：
 
-| 策略 | 说明 |
-| --- | --- |
-| 浏览器 embedding API 探测 | 如果当前 Chrome 暴露 `EmbeddingModel` 或类似实验接口，则优先尝试使用 |
-| 本地 feature-hash embedding | 如果浏览器没有可用 embedding API，则使用确定性的本地向量生成方案 |
+- 如果浏览器提供可用 embedding API，优先使用。
+- 否则使用本地 feature-hash embedding。
+- feature-hash 不是真正语义模型，但能提供稳定、离线、可测试的基础检索能力。
 
-需要注意的是，本地 feature-hash embedding 不是神经网络语义向量。它更像一种向量化的模糊词面检索：支持中文 n-gram、英文词和相邻词特征，并通过向量归一化和余弦相似度改善排序稳定性。它比纯关键词检索更平滑，但不能完全理解同义词和深层语义。
+rerank 信号：
 
-这个设计的价值是先把知识库架构切到 embedding 形态：数据结构、检索流程、排序方式和兼容策略都已经准备好。后续接入真正的浏览器本地 embedding 模型时，不需要推倒重写知识库模块。
+- 向量相似度
+- 关键词命中
+- query 词项覆盖率
+- 完整短语或中文紧凑短语命中
+- 文档名命中
+- 词项密度
 
-## 知识库管理 UI
+自测：
 
-底部工具栏中的 `浏览器知识` 是知识库管理入口。
+1. 打开“浏览器知识”。
+2. 新建一个知识空间。
+3. 导入 `examples/localai-knowledge-demo.md`。
+4. 提问 `localAI 是否会上传我的文档？`。
+5. 回答应引用本地文档来源。
+6. 点击回答下方的 `[1] 文档名`，应展开 chunk 预览。
+7. 点击“重建索引”，完成后应出现索引重建成功 toast。
+8. 对照 `examples/knowledge-retrieval-eval.json` 手动逐条测试检索质量。
+
+## 当前网页助手
+
+网页读取由 `public/background.js` 通过 `chrome.scripting.executeScript()` 注入脚本完成。
+
+抽取策略：
+
+- 读取当前可访问 tab。
+- 排除插件自身 tab。
+- 过滤 `script`、`style`、`nav`、`footer`、`aside`、表单控件等噪声。
+- 优先取 `main`、`article`、`[role=main]`，否则回退到 body。
+- 最多保留 24000 字符，Prompt 注入时最多使用 16000 字符。
+
+当前网页动作：
+
+| 动作 | 说明 |
+| ---- | ---- |
+| 摘要 | 总结当前网页 |
+| 问网页 | 用输入框问题基于当前网页回答 |
+| 待办 | 从网页正文提取待办 |
+| 笔记 | 把网页整理成结构化笔记 |
+| 保存到知识库 | 把网页转成 Markdown 并导入当前知识空间 |
+
+自测：
+
+1. 打开任意普通网页。
+2. 打开插件，点击“当前网页 -> 摘要”，应生成网页摘要。
+3. 在输入框输入问题，再点“当前网页 -> 问网页”，应基于网页回答。
+4. 点击“当前网页 -> 待办”，应提取行动项。
+5. 点击“当前网页 -> 保存到知识库”，当前知识空间文件数量应增加。
+6. 切换到插件自身新标签页再读取网页，应自动避开插件 tab，选择最近可读取网页。
+
+## 输入区轻量动作
+
+输入区 `+` 菜单提供四个文本动作：
+
+| 动作 | 优先 API | fallback |
+| ---- | -------- | -------- |
+| 摘要文本 | `Summarizer.summarize()` | `LanguageModel.prompt()` |
+| 中英互译 | `Translator.translate()` | `LanguageModel.prompt()` |
+| 写作 | `Writer.write()` | `LanguageModel.prompt()` |
+| 润色改写 | `Rewriter.rewrite()` | `LanguageModel.prompt()` |
+
+自测：
+
+1. 输入一段长文本，点“摘要文本”，应输出要点摘要。
+2. 输入中文，点“中英互译”，应输出英文。
+3. 输入英文，点“中英互译”，应输出中文。
+4. 输入写作要求，点“写作”，应生成文本。
+5. 输入一句不够自然的话，点“润色改写”，应输出更清晰自然的版本。
+6. 如果专用 API 不可用，应自动使用 Prompt API，不应直接报 `Writer/Rewriter 在当前后台页面不可用`。
+
+## 任务助手
+
+任务助手由四个模块组成：
+
+```text
+assistantIntent
+  -> assistantPlanner
+  -> assistantDeterministicExecutor
+  -> assistantPrompt
+```
+
+### Intent
+
+`assistantIntent.detectAssistantIntent()` 输出：
+
+```ts
+type AssistantIntent = {
+  type: "chat" | "knowledge_qa" | "summarize" | "translate" | "write" | "rewrite" | "plan" | "calculate" | "sort" | "format_convert" | "extract_todos";
+  confidence: number;
+  executionMode: "answer" | "retrieve" | "deterministic" | "ai" | "hybrid";
+  requiredTools: string[];
+  entities: Record<string, string>;
+  rationale: string;
+};
+```
+
+自测：
+
+1. 输入 `帮我计算 12 + 30 的合计`，应识别为 `calculate`。
+2. 输入 `把 3,1,2 从小到大排序`，应识别为 `sort`。
+3. 输入 `把下面内容转成 JSON`，应识别为 `format_convert`。
+4. 输入 `根据知识库回答这个项目的架构`，应识别为 `knowledge_qa`。
+
+### Plan
+
+`assistantPlanner.createAssistantPlan()` 根据 intent 输出步骤，每步包含：
+
+- `id`
+- `title`
+- `description`
+- `tool`
+- `status`
+- `deterministic`
+
+自测：
+
+1. 输入计算任务。
+2. 在 IndexedDB `taskState.plan.steps` 中应看到 `calculator` 步骤和 `language-model` 润色步骤。
+3. 输入知识库问题，应看到 `knowledge-search` 和 `language-model` 步骤。
+
+### Deterministic Executor
+
+`assistantDeterministicExecutor.executeDeterministicTask()` 当前覆盖：
+
+- 计算：`1 + 2 * 3`、`合计 1,2,3`、`平均 1,2,3`、`20 占 50 的百分比`
+- 排序：`把 3,1,20 从小到大排序`
+- 格式转换：`转成 JSON：name=Alice, age=18; name=Bob, age=20`
+
+自测：
+
+1. 输入 `计算 (12 + 30) / 2`，最终答案应基于确定性结果 `21`。
+2. 输入 `20 占 50 的百分比`，最终答案应基于确定性结果 `40`。
+3. 输入 `把 3, 1, 20 从小到大排序`，应输出 `1, 3, 20`。
+4. 输入 `转成表格：name=Alice, age=18; name=Bob, age=20`，应输出 Markdown 表格。
+5. 断开或禁用模型时，确定性任务仍应返回程序结果。
+
+## 会话历史和恢复
+
+会话保存在 IndexedDB：`local-ai / conversations`。
 
 当前支持：
 
-| 功能 | 说明 |
-| --- | --- |
-| 导入文件 | 点击 chip 或弹层里的加号导入 `.md`、`.txt` |
-| 查看数量 | chip 上展示当前知识文件数量 |
-| 查看列表 | hover 或 focus 后展示已导入文件列表 |
-| 查看元信息 | 列表展示文件名、导入时间和大小 |
-| 删除单个文件 | 删除文档元数据和对应 chunk |
-| 清空知识库 | 清空所有文档和 chunk |
+- 自动保存用户消息和 AI 回复。
+- 打开插件默认恢复最近会话。
+- 左上角历史入口展示最近会话。
+- 新建对话。
+- 保存 `taskState`。
+- 运行中任务恢复进度。
+- 失败任务继续执行。
 
-这让知识库从“只能导入，不能管理”的一次性能力，变成了可持续使用的本地资料入口。
+自测：
 
-## 会话持久化
+1. 发送一个任务后关闭 popup。
+2. 重新打开插件，应恢复最近会话和任务状态。
+3. 选择历史会话，应恢复该会话消息、状态和任务信息。
+4. 如果任务失败，应看到“继续任务”按钮。
+5. 点击“继续任务”，应使用原 `promptText` 和 `aiTask` 重新提交。
 
-localAI 使用 IndexedDB 保存对话历史。
-
-当前支持：
-
-| 功能 | 说明 |
-| --- | --- |
-| 自动保存会话 | 用户发送消息和 AI 回复后保存到本地 |
-| 最近会话恢复 | 打开插件时默认加载最近一次会话 |
-| 历史会话列表 | 左上角历史按钮 hover 后展示最近会话 |
-| 新建对话 | 顶部编辑按钮创建新会话 |
-| 运行状态恢复 | 后台任务运行中时保存 `running` 状态 |
-
-这个能力让插件不再只是一次性问答框，而是一个有连续上下文的本地 AI 工作台。
-
-## Markdown 回复渲染
+## Markdown 渲染和引用
 
 AI 回复使用 `react-markdown` 和 `remark-gfm` 渲染。
 
-当前支持：
+支持：
 
-| 内容类型 | 效果 |
-| --- | --- |
-| 标题和段落 | 按 Markdown 结构展示 |
-| 加粗、列表 | 正常渲染，不再显示源码符号 |
-| 表格 | 支持 GitHub Flavored Markdown，并提供横向滚动 |
-| 代码块 | 使用独立代码块样式展示 |
-| 引用来源 | 回答下方展示 `[1] 文档名` 形式的来源 |
+- 标题
+- 段落
+- 加粗
+- 列表
+- 表格
+- 代码块
+- 本地知识引用来源
+- 点击引用展开 chunk 预览
 
-这让模型输出更接近可读文档，而不是一段未处理的 Markdown 源码。
+自测：
 
-## 交互和视觉设计
+1. 让模型输出表格，应正确渲染为表格。
+2. 让模型输出代码块，应显示独立代码样式。
+3. 基于知识库提问后，点击来源引用，应展开对应 chunk。
 
-当前 UI 是一个固定尺寸的浏览器插件工作区，Popup 尺寸为 `760px x 600px`。
+## 测试和验证
 
-主要交互设计：
+当前项目提供最小回归测试：
 
-| 区域 | 设计 |
-| --- | --- |
-| 顶部栏 | 压缩到 58px，保留历史、新建、标题和语言切换 |
-| 消息区 | 自动滚动到底部，用户消息和 AI 消息左右区分 |
-| 输入区 | 底部固定，左右和底部边距统一为 16px |
-| 发送按钮 | 加载状态直接替换发送图标 |
-| AI 消息操作 | hover 时展示复制、点赞、点踩、重新生成等操作入口 |
-| 语言切换 | 支持中文和英文，默认中文 |
-
-整体设计目标是让插件像一个工作工具，而不是营销页或演示页：信息密度适中、控件位置稳定、常用操作直接可达。
-
-## 当前支持的功能清单
-
-| 功能 | 当前状态 | 用户价值 |
-| --- | --- | --- |
-| Chrome 本地 AI 对话 | 已支持 | 在浏览器内完成本地模型问答 |
-| API 能力探测 | 已支持 | 明确知道当前浏览器哪些 AI API 可用 |
-| 中文默认界面 | 已支持 | 降低中文用户使用成本 |
-| 中英文切换 | 已支持 | 适配中英文使用环境 |
-| 会话持久化 | 已支持 | 关闭插件后仍能保留历史 |
-| 后台推理 | 已支持 | Popup 关闭后任务仍可继续 |
-| Markdown 渲染 | 已支持 | AI 回复更易读 |
-| 本地知识库导入 | 已支持 | 可把项目资料导入本地问答 |
-| embedding 检索 | 已支持 | 用向量相似度召回相关片段 |
-| 关键词兜底 | 已支持 | 提升短查询和兼容旧数据的稳定性 |
-| 知识库管理 | 已支持 | 可查看、删除、清空已导入文件 |
-| 引用来源展示 | 已支持 | 回答可追溯到本地文档片段 |
-
-## 能得到什么结果
-
-导入本地文档后，用户可以围绕文档内容提问。插件会先从 IndexedDB 检索相关片段，再让 Chrome 内置模型基于这些片段回答。
-
-典型结果包括：
-
-1. 对项目文档进行问答，例如“localAI 是否会上传我的文档？”
-2. 对技术说明进行总结，例如“后台执行机制为什么能避免 popup 关闭后中断？”
-3. 对产品能力进行解释，例如“这个插件目前支持哪些知识库文件？”
-4. 根据本地资料生成结构化回答，例如表格、列表和引用来源。
-5. 在回答底部看到命中的知识来源，便于判断回答依据。
-
-如果用户导入 `examples/localai-knowledge-demo.md`，可以测试这些问题：
-
-```text
-localAI 是否会上传我的文档？
-为什么 popup 关闭后 AI 还能继续运行？
-localAI 当前支持哪些知识库文件格式？
-本地知识库如何使用 embedding 检索？
-Chrome Built-in AI 的语言声明有什么限制？
+```bash
+npm test
 ```
 
-理想情况下，回答会优先引用该文档里的信息，并在关键结论后标注 `[1]`、`[2]` 等来源编号。
+可单独运行：
+
+```bash
+npm run test:prompt
+npm run test:intent
+npm run test:planner
+npm run test:executor
+```
+
+构建验证：
+
+```bash
+npm run build
+```
+
+建议每次改动至少执行：
+
+```bash
+npm test
+npm run build
+```
 
 ## 当前限制
 
-localAI 现在仍有一些明确边界：
-
 | 限制 | 影响 |
-| --- | --- |
-| Chrome Built-in AI 依赖浏览器版本和 flags | API 不可用时无法完成本地推理 |
-| 默认 embedding 不是神经网络语义向量 | 同义词、深层语义和跨语言召回能力有限 |
-| 仅支持 `.md` 和 `.txt` | PDF、DOCX 和图片知识暂不支持 |
-| 检索结果没有独立评测集 | 召回质量主要靠人工测试判断 |
-| 知识库没有分组和命名空间 | 多项目资料混用时需要用户手动管理 |
-| 后台任务仅覆盖 Prompt 主流程 | 摘要、翻译等任务还没有完整后台工作流 |
+| ---- | ---- |
+| Chrome Built-in AI 依赖浏览器版本、flags 和模型下载状态 | 不同机器上 API 可用性可能不同 |
+| offscreen 中专用 API 可能不可用 | 已用 Prompt API 兜底，但效果依赖 Prompt 模型 |
+| 默认 embedding 不是神经网络语义向量 | 同义词、跨语言和深层语义召回有限 |
+| 文档导入仅支持 `.md` 和 `.txt` | PDF、DOCX、图片和网页批量资料暂未覆盖 |
+| intent 当前主要是规则识别 | 复杂表达可能分类不准 |
+| 确定性执行器覆盖面有限 | 复杂表格、复杂公式、自然语言日期还需要增强 |
+| 任务状态 UI 仍是轻量状态条 | 还没有完整任务卡片和逐步骤状态展示 |
 
-这些限制不影响当前 MVP 的核心验证，但会决定后续迭代重点。
+## 下一阶段
 
-## 后续演进方向
+下一阶段从 `todo.md` 的迭代 6 开始：
 
-建议后续按优先级推进：
+1. 任务卡片 UI：展示 intent、plan、步骤状态和工具使用。
+2. 失败任务体验：复制错误、查看任务详情、继续任务。
+3. 手动验收文档：覆盖 popup、side panel、新标签页、后台任务、知识库、记忆、网页助手和确定性工具。
+4. 清理 `document.execCommand` 复制 fallback。
 
-1. 接入真正可用的本地 embedding 模型或 Chrome 官方 embedding API。
-2. 增加知识库检索评测样例，记录查询、命中片段和期望答案。
-3. 支持 PDF 和 DOCX 文本解析。
-4. 增加知识库分组，让不同项目资料隔离。
-5. 增加 chunk 预览和引用跳转，提升答案可验证性。
-6. 把摘要、翻译、写作、改写等任务接入后台执行。
-
-localAI 当前已经完成了本地 AI 插件的关键闭环：本地文档导入、本地检索、浏览器本地推理、后台执行和会话持久化。下一步的重点不是继续堆 UI，而是提升检索质量和结果可验证性。
+后续迭代继续增强确定性工具、记忆系统、知识库导入类型和发布质量。

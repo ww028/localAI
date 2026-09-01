@@ -1,41 +1,76 @@
 # localAI
 
-中文 | [English](#english)
+localAI 是一个本地优先的 Chrome 个人 AI 助手插件。它调用 Chrome Built-in AI，在浏览器内完成对话、网页阅读、本地知识库问答、个人记忆和轻量任务处理。
 
-localAI 是一个 Chrome Manifest V3 插件，用于在浏览器本地完成 AI 对话和本地知识库问答。
+技术架构、模块边界、数据流和完整自测说明请看：[localAI Chrome 插件技术架构与功能自测](docs/localai-extension-overview.md)。
 
-项目会在可用时调用 Chrome Built-in AI API，把对话和知识库元数据保存在 IndexedDB，并通过 background service worker 与 offscreen document 保持长耗时推理任务运行，避免 popup 关闭导致任务中断。
+如果 README 和该文档存在内容冲突，以 `docs/localai-extension-overview.md` 为准。
 
-## 当前能力
+## 核心能力
 
-- 通过 Chrome `LanguageModel` 实现浏览器本地 AI 对话。
-- 探测 `LanguageModel`、`Summarizer`、`Translator`、`LanguageDetector`、`Writer`、`Rewriter` 等 Chrome Built-in AI 能力。
-- 支持导入 `.md` 和 `.txt` 文件作为本地知识库。
-- 支持知识文档切片、本地 embedding 生成、余弦相似度检索和关键词兜底评分。
-- 支持知识库管理 UI：查看已导入文件、删除单个文件、清空知识库。
-- 支持检索增强生成：把命中的知识片段拼接进 prompt，并在 AI 回复中展示来源。
-- 使用 IndexedDB 持久化历史会话，并在重新打开插件时恢复最近一次会话。
-- 使用 `background.js` 和 `offscreen.html` 做后台推理，popup 关闭后任务仍可继续。
-- 使用 Markdown 渲染 AI 回复，支持列表、代码块和 GFM 表格。
-- 支持中文和英文界面，默认中文。
-- 固定尺寸 popup UI，面向紧凑工作场景优化。
+### 本地 AI 对话
 
-## 工作方式
+- 使用 Chrome `LanguageModel` 在浏览器本地生成回答。
+- 默认中文界面，支持中英文切换。
+- 支持 Markdown 渲染，包括列表、代码块和表格。
+- 支持历史会话保存和恢复。
 
-```text
-用户提问
-  -> App 保存用户消息
-  -> knowledgeStore 检索本地知识片段
-  -> App 把检索片段拼接进 prompt
-  -> background.js 把任务转发到 offscreen document
-  -> offscreen.js 调用 Chrome LanguageModel.prompt()
-  -> conversationStore 保存 AI 回复
-  -> popup 重新打开后从 IndexedDB 恢复最新会话
-```
+### 多入口使用
 
-知识库是本地优先的。导入的文档会在浏览器内读取、切分、生成本地向量并保存到 IndexedDB。当前默认 embedding 实现是确定性的本地 feature-hash 向量；如果后续浏览器提供兼容的 embedding API，检索层已经预留接入位置。
+- Toolbar popup：适合快速提问。
+- Chrome side panel：适合边浏览网页边使用。
+- 新标签页：适合长对话和复杂任务。
 
-## 环境要求
+### 本地知识库
+
+- 支持导入 `.md` 和 `.txt` 文件。
+- 支持多个知识空间，例如个人资料、项目资料、专题资料。
+- 本地切分 chunk、生成 embedding、检索和 rerank。
+- 回答中展示引用来源。
+- 点击引用可以查看对应 chunk 原文。
+- 支持重建当前知识空间索引。
+
+### 个人记忆
+
+- 可以输入 `记住 ...` 保存个人偏好、长期事实、项目约定或任务状态。
+- 可以输入 `忘记 ...`、`忘掉 ...` 删除相关记忆。
+- 输入区提供“个人记忆”入口，可查看、编辑、删除和导出记忆。
+- 回答时只注入与当前问题相关的少量记忆。
+
+### 当前网页助手
+
+- 读取当前网页正文。
+- 支持网页摘要。
+- 支持基于当前网页问答。
+- 支持从网页提取待办。
+- 支持把网页整理成笔记。
+- 支持将当前网页保存到当前知识空间。
+
+### 输入区轻量动作
+
+点击输入区左侧 `+` 可以使用：
+
+- 摘要文本
+- 中英互译
+- 写作
+- 润色改写
+
+翻译会自动判断方向：中文默认翻译为英文，英文默认翻译为中文。专用 API 不可用时，会自动退回 Prompt API。
+
+### 任务助手
+
+localAI 已具备任务助手的基础链路：
+
+- 意图识别：输出结构化 intent。
+- 计划器：输出可执行步骤和需要的工具。
+- 确定性执行：计算、排序、格式转换不交给模型猜。
+- 模型润色：Chrome 内置模型只负责解释和表达。
+- 任务状态：保存 `queued`、`checking`、`creating-session`、`downloading`、`running`、`failed`、`completed`。
+- 继续任务：失败任务可以回到会话后继续执行。
+
+## 安装和运行
+
+### 环境要求
 
 - Node.js 20 或更新版本。
 - Chrome Canary，或启用了相关 Chrome Built-in AI API 的 Chrome 版本。
@@ -47,9 +82,9 @@ localAI 是一个 Chrome Manifest V3 插件，用于在浏览器本地完成 AI 
 - `chrome://on-device-internals/`
 - `chrome://extensions/`
 
-Chrome Built-in AI API 仍处于实验阶段，可用性会受到 Chrome 版本、渠道、flags、平台支持和模型下载状态影响。如果 API 缺失或不可用，优先检查 Chrome 自身的 AI 和模型状态页面。
+Chrome Built-in AI API 仍处于实验阶段，可用性会受到 Chrome 版本、渠道、flags、平台支持和模型下载状态影响。
 
-## 本地开发
+### 本地开发
 
 安装依赖：
 
@@ -63,9 +98,9 @@ npm install
 npm run dev
 ```
 
-这适合做 UI 开发。若要验证真实插件行为，需要构建后在 Chrome 中加载生成的 `dist/` 目录。
+这适合做 UI 开发。若要验证真实插件行为，需要构建后在 Chrome 中加载 `dist/`。
 
-## 加载插件
+### 加载插件
 
 构建插件：
 
@@ -79,7 +114,121 @@ npm run build
 2. 开启 Developer mode。
 3. 点击 Load unpacked。
 4. 选择本仓库生成的 `dist/` 目录。
-5. 从浏览器工具栏 popup 或 Chrome side panel 打开 `localAI`。
+5. 从浏览器工具栏打开 `localAI`。
+
+## 使用说明
+
+### 普通对话
+
+1. 打开插件。
+2. 在输入框输入问题。
+3. 点击发送按钮。
+4. 等待本地模型回复。
+
+可测试：
+
+```text
+你能做什么？
+帮我规划一下今天的工作
+```
+
+### 使用个人记忆
+
+保存记忆：
+
+```text
+记住 我的回答风格偏好是简洁直接
+```
+
+删除记忆：
+
+```text
+忘掉回答风格偏好
+```
+
+查看和管理记忆：
+
+1. 点击输入区的“个人记忆”。
+2. 查看记忆列表。
+3. 可编辑、删除或导出记忆。
+
+### 使用知识库
+
+1. 点击输入区的“浏览器知识”。
+2. 选择或新建知识空间。
+3. 导入 `.md` 或 `.txt` 文件。
+4. 输入和文档相关的问题。
+
+可用测试文档：
+
+- [examples/localai-knowledge-demo.md](examples/localai-knowledge-demo.md)
+- [examples/knowledge-retrieval-eval.json](examples/knowledge-retrieval-eval.json)
+
+可测试：
+
+```text
+localAI 是否会上传我的文档？
+为什么 popup 关闭后 AI 还能继续运行？
+localAI 当前支持哪些知识库文件格式？
+本地知识库如何使用 embedding 检索？
+```
+
+回答底部如果出现 `[1] 文档名`，点击后可以查看引用 chunk。
+
+### 使用当前网页助手
+
+1. 打开任意普通网页。
+2. 打开 localAI。
+3. 点击“当前网页”。
+4. 选择摘要、问网页、待办、笔记或保存到知识库。
+
+可测试：
+
+- 点击“摘要”，应生成网页摘要。
+- 输入问题后点击“问网页”，应基于当前网页回答。
+- 点击“待办”，应从网页中提取行动项。
+- 点击“保存到知识库”，当前知识空间文件数量应增加。
+
+### 使用轻量文本动作
+
+1. 在输入框输入文本。
+2. 点击 `+`。
+3. 选择摘要文本、中英互译、写作或润色改写。
+
+可测试：
+
+```text
+测试
+test
+今天是个好日子
+写一段介绍 localAI 的短文
+```
+
+### 使用确定性任务
+
+localAI 会先识别任务类型，再用确定性程序处理适合程序执行的任务。
+
+可测试：
+
+```text
+计算 (12 + 30) / 2
+合计 1, 2, 3
+20 占 50 的百分比
+把 3, 1, 20 从小到大排序
+转成表格：name=Alice, age=18; name=Bob, age=20
+转成 JSON：name=Alice, age=18; name=Bob, age=20
+```
+
+这些任务的核心结果由程序计算、排序或转换，模型只负责解释和润色。
+
+### 恢复和继续任务
+
+1. 发送一个任务。
+2. 关闭 popup。
+3. 重新打开插件。
+4. 应恢复最近会话和任务状态。
+5. 如果任务失败，会出现“继续任务”按钮。
+6. 点击后会使用保存的任务 payload 重新提交。
 
 ## 常用脚本
 
@@ -89,181 +238,38 @@ npm run build      # 类型检查并生成可加载的插件构建产物
 npm run build:extension
 npm run preview    # 预览生产构建
 npm run typecheck  # 仅运行 TypeScript 检查
+npm test           # 运行最小回归测试
+npm run test:prompt
+npm run test:intent
+npm run test:planner
+npm run test:executor
 ```
 
-## 项目结构
+## 给开发同学
 
-```text
-src/
-  App.tsx                    # 主 React UI 和对话流程
-  lib/chromeAi.ts            # Chrome Built-in AI 适配层
-  lib/conversationStore.ts   # IndexedDB 会话存储
-  lib/knowledgeStore.ts      # 本地知识导入、embedding、检索和删除
-  styles/main.css            # Popup 布局和交互样式
-  vite-env.d.ts              # 实验性 Chrome AI 类型声明
-public/
-  manifest.json              # Chrome 插件 manifest
-  background.js              # MV3 service worker 和 offscreen 调度
-  offscreen.html             # 承载长耗时 AI 任务的隐藏页面
-  offscreen.js               # 后台 Prompt API 执行逻辑
-docs/
-  chrome-built-in-ai.md
-  localai-extension-overview.md
-examples/
-  localai-knowledge-demo.md
-```
+README 只保留功能介绍和使用说明。技术实现请优先看：
 
-## 文档
-
+- [localAI Chrome 插件技术架构与功能自测](docs/localai-extension-overview.md)
 - [Chrome Built-in AI Notes](docs/chrome-built-in-ai.md)
-- [localAI Chrome 插件实现与能力总览](docs/localai-extension-overview.md)
-- [知识库测试文档](examples/localai-knowledge-demo.md)
+- [知识库检索评测](docs/knowledge-retrieval-evaluation.md)
+
+如果文档之间出现冲突，以 [docs/localai-extension-overview.md](docs/localai-extension-overview.md) 为准。
 
 ## 当前限制
 
-- Chrome Built-in AI 可用性依赖浏览器版本、flags、平台支持和模型资源。
-- 当前默认 embedding 是本地 feature-hash 向量，不是真正的神经网络语义向量。
+- Chrome Built-in AI 依赖浏览器版本、flags、平台支持和模型下载状态。
+- offscreen 中某些专用 API 可能不可用，当前会用 Prompt API 兜底。
+- 默认 embedding 是本地 feature-hash 向量，不是真正的神经网络语义向量。
 - 知识库导入暂时只支持 `.md` 和 `.txt`。
-- 知识库还没有按项目或工作区分组。
-- 后台执行目前覆盖主对话 Prompt 流程。
+- 意图识别当前主要是规则识别，复杂表达可能分类不准。
+- 任务状态 UI 还是轻量状态条，尚未做完整任务卡片。
 
-## 设计方向
+## 下一步
 
-localAI 会把浏览器 AI 调用、本地持久化和知识库检索收敛在小而稳定的模块里，让产品工作流在 Chrome 实验性 AI API 演进时仍然保持可维护。
+下一阶段按 `todo.md` 的迭代 6 推进：
 
-当前主方向是本地优先 RAG：导入私有文档，在本地检索相关片段，再让 Chrome 端侧模型基于引用上下文回答。
-
-## English
-
-[中文](#localai) | English
-
-localAI is a Chrome Manifest V3 extension for browser-local AI chat and local knowledge-base question answering.
-
-The project uses Chrome Built-in AI APIs where available, stores conversations and knowledge metadata in IndexedDB, and keeps long-running prompt tasks alive through a background service worker plus an offscreen document.
-
-## Current Capabilities
-
-- Browser-local AI chat through Chrome `LanguageModel`.
-- Capability checks for `LanguageModel`, `Summarizer`, `Translator`, `LanguageDetector`, `Writer`, and `Rewriter`.
-- Local knowledge-base import for `.md` and `.txt` files.
-- Knowledge chunking, local embedding generation, cosine-similarity retrieval, and keyword fallback scoring.
-- Knowledge management UI for viewing imported files, deleting one file, or clearing the whole knowledge base.
-- Retrieval-augmented prompting with source snippets and source labels in assistant replies.
-- IndexedDB conversation persistence and recent conversation recovery.
-- Background inference with `background.js` and `offscreen.html`, so popup closure does not interrupt running AI tasks.
-- Markdown rendering for assistant replies, including lists, code blocks, and GFM tables.
-- Chinese and English UI switching, with Chinese as the default language.
-- Fixed-size popup UI optimized for a compact working surface.
-
-## How It Works
-
-```text
-User asks a question
-  -> App saves the user message
-  -> knowledgeStore searches local document chunks
-  -> App builds a prompt with retrieved snippets
-  -> background.js forwards the job to the offscreen document
-  -> offscreen.js calls Chrome LanguageModel.prompt()
-  -> conversationStore saves the assistant response
-  -> popup reloads the latest conversation from IndexedDB
-```
-
-The knowledge base is local-first. Imported documents are read in the browser, split into chunks, embedded locally, and stored in IndexedDB. The default embedding implementation is a deterministic local feature-hash vector. If a compatible browser embedding API becomes available, the retrieval layer is already structured to use it.
-
-## Requirements
-
-- Node.js 20 or newer.
-- Chrome Canary or a Chrome version with the relevant Built-in AI APIs enabled.
-- Built-in AI flags and model assets configured in Chrome.
-
-Useful Chrome pages:
-
-- `chrome://flags/`
-- `chrome://on-device-internals/`
-- `chrome://extensions/`
-
-Chrome Built-in AI APIs are experimental and vary by version, channel, flags, and model download state. If an API is missing or unavailable, inspect Chrome's own AI/model pages first.
-
-## Development
-
-Install dependencies:
-
-```bash
-npm install
-```
-
-Run the Vite development server:
-
-```bash
-npm run dev
-```
-
-This is useful for UI development. For real extension behavior, build and load the generated `dist/` directory in Chrome.
-
-## Load The Extension
-
-Build the extension:
-
-```bash
-npm run build
-```
-
-Then in Chrome:
-
-1. Open `chrome://extensions/`.
-2. Enable Developer mode.
-3. Click Load unpacked.
-4. Select this repo's `dist/` directory.
-5. Open `localAI` from the toolbar popup or Chrome side panel.
-
-## Scripts
-
-```bash
-npm run dev        # start local development server
-npm run build      # typecheck and create loadable extension build
-npm run build:extension
-npm run preview    # preview production build
-npm run typecheck  # run TypeScript checks only
-```
-
-## Project Structure
-
-```text
-src/
-  App.tsx                    # Main React UI and chat workflow
-  lib/chromeAi.ts            # Chrome Built-in AI adapter
-  lib/conversationStore.ts   # IndexedDB conversation storage
-  lib/knowledgeStore.ts      # Local knowledge import, embedding, retrieval, deletion
-  styles/main.css            # Popup layout and interaction styles
-  vite-env.d.ts              # Experimental Chrome AI type declarations
-public/
-  manifest.json              # Chrome extension manifest
-  background.js              # MV3 service worker and offscreen orchestration
-  offscreen.html             # Hidden document for long-running AI tasks
-  offscreen.js               # Background Prompt API execution
-docs/
-  chrome-built-in-ai.md
-  localai-extension-overview.md
-examples/
-  localai-knowledge-demo.md
-```
-
-## Documentation
-
-- [Chrome Built-in AI Notes](docs/chrome-built-in-ai.md)
-- [localAI Chrome 插件实现与能力总览](docs/localai-extension-overview.md)
-- [Knowledge Base Demo Document](examples/localai-knowledge-demo.md)
-
-## Current Limits
-
-- Chrome Built-in AI availability depends on browser version, flags, platform support, and model assets.
-- The default embedding path is a local feature-hash vector, not a neural semantic embedding model.
-- Knowledge import currently supports `.md` and `.txt` only.
-- Knowledge bases are not yet grouped by project or workspace.
-- Background execution currently covers the main prompt workflow.
-
-## Design Direction
-
-localAI keeps browser AI calls, local persistence, and knowledge retrieval behind small modules so the product workflow can remain stable while Chrome's experimental AI APIs evolve.
-
-The main product direction is local-first RAG: import private documents, retrieve relevant snippets locally, and ask Chrome's on-device model to answer with cited context.
+- 任务卡片 UI
+- 计划步骤状态展示
+- 失败任务详情
+- 端到端手测清单
+- 清理 `document.execCommand` fallback

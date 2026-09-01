@@ -1,5 +1,6 @@
 export type KnowledgeDocument = {
   id: string;
+  spaceId: string;
   name: string;
   type: string;
   size: number;
@@ -10,6 +11,7 @@ export type KnowledgeDocument = {
 
 export type KnowledgeChunk = {
   id: string;
+  spaceId: string;
   documentId: string;
   documentName: string;
   index: number;
@@ -22,22 +24,47 @@ export type KnowledgeChunk = {
 
 export type KnowledgeMatch = {
   documentId: string;
+  spaceId: string;
   documentName: string;
   chunkIndex: number;
   text: string;
   score: number;
 };
 
+export type KnowledgeSpace = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type RebuildKnowledgeIndexResult = {
+  documentCount: number;
+  chunkCount: number;
+  embeddingModel: string;
+  embeddingDimensions: number;
+};
+
 const DB_NAME = "local-ai-knowledge";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const DEFAULT_SPACE_ID = "default";
 const DOCUMENT_STORE = "documents";
 const CHUNK_STORE = "chunks";
+const SPACE_STORE = "spaces";
 const MAX_CHUNK_LENGTH = 900;
 const CHUNK_OVERLAP = 120;
 const EMBEDDING_DIMENSIONS = 384;
 const EMBEDDING_MODEL = "local-feature-hash-v1";
 const VECTOR_WEIGHT = 100;
 const KEYWORD_WEIGHT = 0.2;
+const MIN_RERANK_CANDIDATES = 20;
+const RERANK_CANDIDATE_MULTIPLIER = 4;
+const RERANK_VECTOR_WEIGHT = 80;
+const RERANK_KEYWORD_WEIGHT = 0.35;
+const RERANK_COVERAGE_WEIGHT = 32;
+const RERANK_PHRASE_WEIGHT = 18;
+const RERANK_TITLE_WEIGHT = 10;
+const RERANK_DENSITY_WEIGHT = 6;
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -46,12 +73,28 @@ function openDatabase(): Promise<IDBDatabase> {
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(DOCUMENT_STORE)) {
-        db.createObjectStore(DOCUMENT_STORE, { keyPath: "id" });
+        const store = db.createObjectStore(DOCUMENT_STORE, { keyPath: "id" });
+        store.createIndex("spaceId", "spaceId");
+      } else {
+        const store = request.transaction?.objectStore(DOCUMENT_STORE);
+        if (store && !store.indexNames.contains("spaceId")) {
+          store.createIndex("spaceId", "spaceId");
+        }
       }
       if (!db.objectStoreNames.contains(CHUNK_STORE)) {
         const store = db.createObjectStore(CHUNK_STORE, { keyPath: "id" });
         store.createIndex("documentId", "documentId");
+        store.createIndex("spaceId", "spaceId");
+      } else {
+        const store = request.transaction?.objectStore(CHUNK_STORE);
+        if (store && !store.indexNames.contains("spaceId")) {
+          store.createIndex("spaceId", "spaceId");
+        }
       }
+      if (!db.objectStoreNames.contains(SPACE_STORE)) {
+        db.createObjectStore(SPACE_STORE, { keyPath: "id" });
+      }
+      migrateKnowledgeDatabase(request.transaction);
     };
 
     request.onsuccess = () => resolve(request.result);
@@ -59,7 +102,89 @@ function openDatabase(): Promise<IDBDatabase> {
   });
 }
 
-export async function importKnowledgeFiles(files: File[]) {
+function migrateKnowledgeDatabase(transaction: IDBTransaction | null) {
+  if (!transaction) {
+    return;
+  }
+
+  const now = Date.now();
+  transaction.objectStore(SPACE_STORE).put({
+    ...getDefaultKnowledgeSpace(),
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const documentStore = transaction.objectStore(DOCUMENT_STORE);
+  documentStore.openCursor().onsuccess = (event) => {
+    const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+    if (!cursor) {
+      return;
+    }
+
+    const document = cursor.value as Partial<KnowledgeDocument>;
+    if (!document.spaceId) {
+      cursor.update({
+        ...document,
+        spaceId: DEFAULT_SPACE_ID,
+      });
+    }
+    cursor.continue();
+  };
+
+  const chunkStore = transaction.objectStore(CHUNK_STORE);
+  chunkStore.openCursor().onsuccess = (event) => {
+    const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+    if (!cursor) {
+      return;
+    }
+
+    const chunk = cursor.value as Partial<KnowledgeChunk>;
+    if (!chunk.spaceId) {
+      cursor.update({
+        ...chunk,
+        spaceId: DEFAULT_SPACE_ID,
+      });
+    }
+    cursor.continue();
+  };
+}
+
+function getDefaultKnowledgeSpace(): KnowledgeSpace {
+  return {
+    id: DEFAULT_SPACE_ID,
+    name: "个人资料",
+    createdAt: 0,
+    updatedAt: 0,
+  };
+}
+
+async function ensureKnowledgeSpace(spaceId: string) {
+  if (spaceId !== DEFAULT_SPACE_ID) {
+    return;
+  }
+
+  const db = await openDatabase();
+  const space = {
+    ...getDefaultKnowledgeSpace(),
+    updatedAt: Date.now(),
+  };
+
+  return new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction(SPACE_STORE, "readwrite");
+    transaction.objectStore(SPACE_STORE).put(space);
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error ?? new Error("Failed to ensure default knowledge space."));
+    };
+  });
+}
+
+export async function importKnowledgeFiles(files: File[], spaceId = DEFAULT_SPACE_ID) {
+  await ensureKnowledgeSpace(spaceId);
   const documents: KnowledgeDocument[] = [];
 
   for (const file of files) {
@@ -72,6 +197,7 @@ export async function importKnowledgeFiles(files: File[]) {
       const embedding = await createTextEmbedding(chunk);
       chunks.push({
         id: `${documentId}:${index}`,
+        spaceId,
         documentId,
         documentName: file.name,
         index,
@@ -85,6 +211,7 @@ export async function importKnowledgeFiles(files: File[]) {
 
     const document: KnowledgeDocument = {
       id: documentId,
+      spaceId,
       name: file.name,
       type: file.type || "text/plain",
       size: file.size,
@@ -100,12 +227,13 @@ export async function importKnowledgeFiles(files: File[]) {
   return documents;
 }
 
-export async function listKnowledgeDocuments(): Promise<KnowledgeDocument[]> {
+export async function listKnowledgeDocuments(spaceId = DEFAULT_SPACE_ID): Promise<KnowledgeDocument[]> {
+  await ensureKnowledgeSpace(spaceId);
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(DOCUMENT_STORE, "readonly");
-    const request = transaction.objectStore(DOCUMENT_STORE).getAll();
+    const request = transaction.objectStore(DOCUMENT_STORE).index("spaceId").getAll(spaceId);
 
     request.onsuccess = () => {
       db.close();
@@ -114,6 +242,54 @@ export async function listKnowledgeDocuments(): Promise<KnowledgeDocument[]> {
     request.onerror = () => {
       db.close();
       reject(request.error ?? new Error("Failed to list knowledge documents."));
+    };
+  });
+}
+
+export async function listKnowledgeSpaces(): Promise<KnowledgeSpace[]> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(SPACE_STORE, "readonly");
+    const request = transaction.objectStore(SPACE_STORE).getAll();
+
+    request.onsuccess = () => {
+      db.close();
+      const spaces = request.result.sort((left, right) => left.createdAt - right.createdAt);
+      resolve(spaces.length ? spaces : [getDefaultKnowledgeSpace()]);
+    };
+    request.onerror = () => {
+      db.close();
+      reject(request.error ?? new Error("Failed to list knowledge spaces."));
+    };
+  });
+}
+
+export async function createKnowledgeSpace(name: string): Promise<KnowledgeSpace> {
+  const trimmedName = name.trim();
+  if (!trimmedName) {
+    throw new Error("Knowledge space name is required.");
+  }
+
+  const now = Date.now();
+  const space: KnowledgeSpace = {
+    id: crypto.randomUUID(),
+    name: trimmedName,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(SPACE_STORE, "readwrite");
+    transaction.objectStore(SPACE_STORE).put(space);
+    transaction.oncomplete = () => {
+      db.close();
+      resolve(space);
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error ?? new Error("Failed to create knowledge space."));
     };
   });
 }
@@ -149,13 +325,34 @@ export async function deleteKnowledgeDocument(documentId: string): Promise<void>
   });
 }
 
-export async function clearKnowledgeDocuments(): Promise<void> {
+export async function clearKnowledgeDocuments(spaceId = DEFAULT_SPACE_ID): Promise<void> {
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
     const transaction = db.transaction([DOCUMENT_STORE, CHUNK_STORE], "readwrite");
-    transaction.objectStore(DOCUMENT_STORE).clear();
-    transaction.objectStore(CHUNK_STORE).clear();
+    const documentStore = transaction.objectStore(DOCUMENT_STORE);
+    const documentIndex = documentStore.index("spaceId");
+    const documentRequest = documentIndex.openKeyCursor(IDBKeyRange.only(spaceId));
+    documentRequest.onsuccess = () => {
+      const cursor = documentRequest.result;
+      if (!cursor) {
+        return;
+      }
+      documentStore.delete(cursor.primaryKey);
+      cursor.continue();
+    };
+
+    const chunkStore = transaction.objectStore(CHUNK_STORE);
+    const chunkIndex = chunkStore.index("spaceId");
+    const chunkRequest = chunkIndex.openKeyCursor(IDBKeyRange.only(spaceId));
+    chunkRequest.onsuccess = () => {
+      const cursor = chunkRequest.result;
+      if (!cursor) {
+        return;
+      }
+      chunkStore.delete(cursor.primaryKey);
+      cursor.continue();
+    };
 
     transaction.oncomplete = () => {
       db.close();
@@ -168,8 +365,9 @@ export async function clearKnowledgeDocuments(): Promise<void> {
   });
 }
 
-export async function searchKnowledge(query: string, limit = 5): Promise<KnowledgeMatch[]> {
+export async function searchKnowledge(query: string, limit = 5, spaceId = DEFAULT_SPACE_ID): Promise<KnowledgeMatch[]> {
   const queryTerms = tokenize(query);
+  const queryProfile = createQueryProfile(query, queryTerms);
   const queryEmbedding = await createTextEmbedding(query);
   let localQueryEmbedding: TextEmbedding | undefined;
 
@@ -181,11 +379,12 @@ export async function searchKnowledge(query: string, limit = 5): Promise<Knowled
 
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(CHUNK_STORE, "readonly");
-    const request = transaction.objectStore(CHUNK_STORE).getAll();
+    const request = transaction.objectStore(CHUNK_STORE).index("spaceId").getAll(spaceId);
 
     request.onsuccess = () => {
       db.close();
-      const matches = request.result
+      const candidateLimit = Math.max(limit * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES);
+      const candidates = request.result
         .map((chunk: KnowledgeChunk) => {
           const chunkEmbedding = selectCompatibleEmbedding(chunk, queryEmbedding);
           const compatibleQueryEmbedding =
@@ -198,18 +397,24 @@ export async function searchKnowledge(query: string, limit = 5): Promise<Knowled
             chunkEmbedding.values,
           );
           const keywordScore = scoreChunk(queryTerms, chunk);
+          const coarseScore = vectorScore * VECTOR_WEIGHT + keywordScore * KEYWORD_WEIGHT;
 
           return {
+            chunk,
+            vectorScore,
+            keywordScore,
+            coarseScore,
             documentId: chunk.documentId,
+            spaceId: chunk.spaceId ?? DEFAULT_SPACE_ID,
             documentName: chunk.documentName,
             chunkIndex: chunk.index,
             text: chunk.text,
-            score: vectorScore * VECTOR_WEIGHT + keywordScore * KEYWORD_WEIGHT,
           };
         })
-        .filter((match: KnowledgeMatch) => match.score > 0)
-        .sort((left: KnowledgeMatch, right: KnowledgeMatch) => right.score - left.score)
-        .slice(0, limit);
+        .filter((candidate: SearchCandidate) => candidate.coarseScore > 0)
+        .sort((left: SearchCandidate, right: SearchCandidate) => right.coarseScore - left.coarseScore)
+        .slice(0, candidateLimit);
+      const matches = rerankKnowledgeCandidates(candidates, queryProfile).slice(0, limit);
       resolve(matches);
     };
     request.onerror = () => {
@@ -217,6 +422,42 @@ export async function searchKnowledge(query: string, limit = 5): Promise<Knowled
       reject(request.error ?? new Error("Failed to search knowledge."));
     };
   });
+}
+
+export async function rebuildKnowledgeIndex(spaceId = DEFAULT_SPACE_ID): Promise<RebuildKnowledgeIndexResult> {
+  const chunks = await listKnowledgeChunks(spaceId);
+  if (!chunks.length) {
+    return {
+      documentCount: 0,
+      chunkCount: 0,
+      embeddingModel: EMBEDDING_MODEL,
+      embeddingDimensions: EMBEDDING_DIMENSIONS,
+    };
+  }
+
+  const rebuiltChunks: KnowledgeChunk[] = [];
+  for (const chunk of chunks) {
+    const embedding = await createTextEmbedding(chunk.text);
+    rebuiltChunks.push({
+      ...chunk,
+      embedding: embedding.values,
+      embeddingModel: embedding.model,
+      terms: tokenize(chunk.text),
+    });
+  }
+
+  const firstEmbedding = rebuiltChunks[0];
+  await saveRebuiltIndex(spaceId, rebuiltChunks, {
+    embeddingModel: firstEmbedding.embeddingModel,
+    embeddingDimensions: firstEmbedding.embedding.length,
+  });
+
+  return {
+    documentCount: new Set(rebuiltChunks.map((chunk) => chunk.documentId)).size,
+    chunkCount: rebuiltChunks.length,
+    embeddingModel: firstEmbedding.embeddingModel,
+    embeddingDimensions: firstEmbedding.embedding.length,
+  };
 }
 
 function saveDocumentWithChunks(document: KnowledgeDocument, chunks: KnowledgeChunk[]) {
@@ -237,6 +478,62 @@ function saveDocumentWithChunks(document: KnowledgeDocument, chunks: KnowledgeCh
         };
       }),
   );
+}
+
+async function listKnowledgeChunks(spaceId: string): Promise<KnowledgeChunk[]> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(CHUNK_STORE, "readonly");
+    const request = transaction.objectStore(CHUNK_STORE).index("spaceId").getAll(spaceId);
+
+    request.onsuccess = () => {
+      db.close();
+      resolve(request.result.sort((left, right) => left.index - right.index));
+    };
+    request.onerror = () => {
+      db.close();
+      reject(request.error ?? new Error("Failed to list knowledge chunks."));
+    };
+  });
+}
+
+async function saveRebuiltIndex(
+  spaceId: string,
+  chunks: KnowledgeChunk[],
+  metadata: Pick<KnowledgeDocument, "embeddingModel" | "embeddingDimensions">,
+) {
+  const db = await openDatabase();
+
+  return new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction([DOCUMENT_STORE, CHUNK_STORE], "readwrite");
+    const chunkStore = transaction.objectStore(CHUNK_STORE);
+    chunks.forEach((chunk) => chunkStore.put(chunk));
+
+    const documentStore = transaction.objectStore(DOCUMENT_STORE);
+    const documentRequest = documentStore.index("spaceId").openCursor(IDBKeyRange.only(spaceId));
+    documentRequest.onsuccess = () => {
+      const cursor = documentRequest.result;
+      if (!cursor) {
+        return;
+      }
+
+      documentStore.put({
+        ...cursor.value,
+        ...metadata,
+      });
+      cursor.continue();
+    };
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error ?? new Error("Failed to rebuild knowledge index."));
+    };
+  });
 }
 
 function createChunks(text: string) {
@@ -277,6 +574,98 @@ function tokenize(text: string) {
 function scoreChunk(queryTerms: string[], chunk: KnowledgeChunk) {
   const terms = new Set(chunk.terms);
   return queryTerms.reduce((score, term) => score + (terms.has(term) ? term.length : 0), 0);
+}
+
+function rerankKnowledgeCandidates(candidates: SearchCandidate[], queryProfile: QueryProfile): KnowledgeMatch[] {
+  return candidates
+    .map((candidate) => {
+      const coverageScore = scoreTermCoverage(queryProfile.terms, candidate.chunk.terms);
+      const phraseScore = scorePhraseMatch(queryProfile, candidate.chunk.text);
+      const titleScore = scoreTitleMatch(queryProfile.terms, candidate.chunk.documentName);
+      const densityScore = scoreTermDensity(queryProfile.terms, candidate.chunk.text);
+      const score =
+        candidate.vectorScore * RERANK_VECTOR_WEIGHT +
+        candidate.keywordScore * RERANK_KEYWORD_WEIGHT +
+        coverageScore * RERANK_COVERAGE_WEIGHT +
+        phraseScore * RERANK_PHRASE_WEIGHT +
+        titleScore * RERANK_TITLE_WEIGHT +
+        densityScore * RERANK_DENSITY_WEIGHT;
+
+      return {
+        documentId: candidate.documentId,
+        spaceId: candidate.spaceId,
+        documentName: candidate.documentName,
+        chunkIndex: candidate.chunkIndex,
+        text: candidate.text,
+        score,
+      };
+    })
+    .sort((left, right) => right.score - left.score);
+}
+
+function createQueryProfile(query: string, terms: string[]): QueryProfile {
+  return {
+    normalizedText: normalizeSearchText(query),
+    compactCjkText: query.replace(/[^\u4e00-\u9fa5]/g, ""),
+    terms,
+  };
+}
+
+function scoreTermCoverage(queryTerms: string[], chunkTerms: string[]) {
+  if (!queryTerms.length) {
+    return 0;
+  }
+
+  const terms = new Set(chunkTerms);
+  const matched = queryTerms.filter((term) => terms.has(term));
+  const matchedWeight = matched.reduce((sum, term) => sum + Math.min(term.length, 8), 0);
+  const totalWeight = queryTerms.reduce((sum, term) => sum + Math.min(term.length, 8), 0);
+  return totalWeight ? matchedWeight / totalWeight : 0;
+}
+
+function scorePhraseMatch(queryProfile: QueryProfile, text: string) {
+  const normalizedText = normalizeSearchText(text);
+  if (queryProfile.normalizedText.length >= 4 && normalizedText.includes(queryProfile.normalizedText)) {
+    return 1;
+  }
+
+  const compactText = text.replace(/[^\u4e00-\u9fa5]/g, "");
+  if (queryProfile.compactCjkText.length >= 4 && compactText.includes(queryProfile.compactCjkText)) {
+    return 0.9;
+  }
+
+  const longTerms = queryProfile.terms.filter((term) => term.length >= 4);
+  if (!longTerms.length) {
+    return 0;
+  }
+
+  const matchedLongTerms = longTerms.filter((term) => normalizedText.includes(term));
+  return matchedLongTerms.length / longTerms.length;
+}
+
+function scoreTitleMatch(queryTerms: string[], documentName: string) {
+  if (!queryTerms.length) {
+    return 0;
+  }
+
+  const normalizedName = normalizeSearchText(documentName);
+  const matched = queryTerms.filter((term) => normalizedName.includes(term));
+  return matched.length / queryTerms.length;
+}
+
+function scoreTermDensity(queryTerms: string[], text: string) {
+  if (!queryTerms.length) {
+    return 0;
+  }
+
+  const normalizedText = normalizeSearchText(text);
+  const hitCount = queryTerms.reduce((count, term) => count + (normalizedText.includes(term) ? 1 : 0), 0);
+  const lengthPenalty = Math.max(normalizedText.length / MAX_CHUNK_LENGTH, 1);
+  return hitCount / queryTerms.length / lengthPenalty;
+}
+
+function normalizeSearchText(text: string) {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 async function createTextEmbedding(text: string): Promise<TextEmbedding> {
@@ -437,4 +826,17 @@ type BrowserEmbeddingSession = {
 type TextEmbedding = {
   model: string;
   values: number[];
+};
+
+type SearchCandidate = Omit<KnowledgeMatch, "score"> & {
+  chunk: KnowledgeChunk;
+  vectorScore: number;
+  keywordScore: number;
+  coarseScore: number;
+};
+
+type QueryProfile = {
+  normalizedText: string;
+  compactCjkText: string;
+  terms: string[];
 };

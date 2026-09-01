@@ -34,20 +34,73 @@ type CapabilityDefinition = {
   globalName: keyof Window;
   availabilityOptions?: Record<string, unknown>;
   createOptions?: Record<string, unknown>;
+  getOptionCandidates?: (locale: Locale, text?: string) => ChromeAiOptionCandidate[];
 };
 
-const promptLanguageOptions = {
-  expectedInputs: [{ type: "text", languages: ["en"] }],
-  expectedOutputs: [{ type: "text", languages: ["en"] }],
+type ChromeAiOptionCandidate = {
+  availabilityOptions?: Record<string, unknown>;
+  createOptions?: Record<string, unknown>;
 };
+
+function getPromptOptionCandidates(locale: Locale): ChromeAiOptionCandidate[] {
+  const preferredLanguages = locale === "zh" ? ["zh", "zh-Hans", "en"] : ["en"];
+
+  return [
+    ...preferredLanguages.map((language) => ({
+      availabilityOptions: {
+        expectedInputs: [{ type: "text", languages: [language] }],
+        expectedOutputs: [{ type: "text", languages: [language] }],
+      },
+      createOptions: {
+        expectedInputs: [{ type: "text", languages: [language] }],
+        expectedOutputs: [{ type: "text", languages: [language] }],
+      },
+    })),
+    {},
+  ];
+}
+
+function getTranslateOptionCandidates(locale: Locale, text = ""): ChromeAiOptionCandidate[] {
+  const direction = detectTranslationDirection(text, locale);
+  const languagePairs =
+    direction === "zh-to-en"
+      ? [
+          { sourceLanguage: "zh", targetLanguage: "en" },
+          { sourceLanguage: "zh-Hans", targetLanguage: "en" },
+        ]
+      : [
+          { sourceLanguage: "en", targetLanguage: "zh" },
+          { sourceLanguage: "en", targetLanguage: "zh-Hans" },
+        ];
+
+  return languagePairs.map((pair) => ({
+    availabilityOptions: pair,
+    createOptions: pair,
+  }));
+}
+
+function getRewriteOptionCandidates(): ChromeAiOptionCandidate[] {
+  const polishOptions = {
+    tone: "more-formal",
+    format: "plain-text",
+    length: "as-is",
+  };
+
+  return [
+    {
+      availabilityOptions: polishOptions,
+      createOptions: polishOptions,
+    },
+    {},
+  ];
+}
 
 export const capabilityDefinitions: CapabilityDefinition[] = [
   {
     task: "prompt",
     label: "Prompt",
     globalName: "LanguageModel",
-    availabilityOptions: promptLanguageOptions,
-    createOptions: promptLanguageOptions,
+    getOptionCandidates: getPromptOptionCandidates,
   },
   {
     task: "summarize",
@@ -68,14 +121,7 @@ export const capabilityDefinitions: CapabilityDefinition[] = [
     task: "translate",
     label: "Translator",
     globalName: "Translator",
-    availabilityOptions: {
-      sourceLanguage: "en",
-      targetLanguage: "zh",
-    },
-    createOptions: {
-      sourceLanguage: "en",
-      targetLanguage: "zh",
-    },
+    getOptionCandidates: getTranslateOptionCandidates,
   },
   {
     task: "detect-language",
@@ -91,6 +137,7 @@ export const capabilityDefinitions: CapabilityDefinition[] = [
     task: "rewrite",
     label: "Rewriter",
     globalName: "Rewriter",
+    getOptionCandidates: getRewriteOptionCandidates,
   },
 ];
 
@@ -147,11 +194,11 @@ export function getDefaultInput(task: AiTask, locale: Locale = "zh") {
   return fallbackPrompts[locale][task];
 }
 
-export async function inspectCapabilities(): Promise<CapabilityStatus[]> {
-  return Promise.all(capabilityDefinitions.map(inspectCapability));
+export async function inspectCapabilities(locale: Locale = "zh"): Promise<CapabilityStatus[]> {
+  return Promise.all(capabilityDefinitions.map((definition) => inspectCapability(definition, locale)));
 }
 
-async function inspectCapability(definition: CapabilityDefinition): Promise<CapabilityStatus> {
+async function inspectCapability(definition: CapabilityDefinition, locale: Locale): Promise<CapabilityStatus> {
   const factory = window[definition.globalName] as ChromeAiFactory<unknown> | undefined;
 
   if (!factory?.create) {
@@ -174,7 +221,7 @@ async function inspectCapability(definition: CapabilityDefinition): Promise<Capa
     };
   }
 
-  const availability = await factory.availability(definition.availabilityOptions);
+  const availability = await resolveAvailability(factory, definition, locale);
 
   return {
     task: definition.task,
@@ -200,38 +247,175 @@ export async function runAiTask({ task, text, locale = "zh", onProgress }: RunTa
 
   const factory = window[definition.globalName] as ChromeAiFactory<unknown> | undefined;
   if (!factory?.create) {
+    if (task !== "prompt" && task !== "detect-language") {
+      return runPromptFallbackTask(task, trimmedText, locale, copy, onProgress);
+    }
     throw new Error(`${definition.label} ${copy.apiMissing}.`);
   }
 
-  onProgress?.({ message: copy.checkingAvailability });
-  if (factory.availability) {
-    const availability = await factory.availability(definition.availabilityOptions);
-    if (availability === "unavailable") {
-      throw new Error(`${definition.label} ${copy.apiUnavailable}.`);
+  try {
+    const session = await createTaskSession(factory, definition, locale, copy, onProgress, trimmedText);
+    try {
+      onProgress?.({ message: copy.runningInference });
+      return await executeSessionTask(task, session, trimmedText, locale);
+    } finally {
+      destroySession(session);
     }
+  } catch (reason) {
+    if (task !== "prompt" && task !== "detect-language") {
+      return runPromptFallbackTask(task, trimmedText, locale, copy, onProgress);
+    }
+    throw reason;
+  }
+}
+
+async function runPromptFallbackTask(
+  task: Exclude<AiTask, "prompt" | "detect-language">,
+  text: string,
+  locale: Locale,
+  copy: Record<string, string>,
+  onProgress?: (progress: TaskProgress) => void,
+) {
+  const languageModel = window.LanguageModel as ChromeAiFactory<unknown> | undefined;
+  if (!languageModel?.create) {
+    throw new Error(`Prompt ${copy.apiMissing}.`);
   }
 
-  onProgress?.({ message: copy.creatingSession });
-  const session = await factory.create({
-    ...definition.createOptions,
-    monitor(monitor) {
-      monitor.addEventListener("downloadprogress", (event) => {
-        const loaded = typeof event.loaded === "number" ? event.loaded : undefined;
-        const total = typeof event.total === "number" && event.total > 0 ? event.total : undefined;
-        onProgress?.({
-          message: copy.downloadingModel,
-          ratio: total ? loaded! / total : loaded,
-        });
-      });
-    },
-  });
+  const promptDefinition = capabilityDefinitions.find((item) => item.task === "prompt");
+  if (!promptDefinition) {
+    throw new Error(`${copy.unsupportedTask}: prompt`);
+  }
 
+  const session = await createTaskSession(languageModel, promptDefinition, locale, copy, onProgress, text);
   try {
     onProgress?.({ message: copy.runningInference });
-    return await executeSessionTask(task, session, trimmedText, locale);
+    return await (session as LanguageModelSession).prompt(buildFallbackPrompt(task, text, locale));
   } finally {
     destroySession(session);
   }
+}
+
+async function resolveAvailability(
+  factory: ChromeAiFactory<unknown>,
+  definition: CapabilityDefinition,
+  locale: Locale,
+): Promise<ChromeAiAvailability> {
+  const candidates = getOptionCandidates(definition, locale);
+  let fallbackStatus: ChromeAiAvailability = "unavailable";
+
+  for (const candidate of candidates) {
+    try {
+      const availability = await factory.availability?.(candidate.availabilityOptions);
+      if (!availability) {
+        return "unknown";
+      }
+      if (availability !== "unavailable") {
+        return availability;
+      }
+      fallbackStatus = availability;
+    } catch {
+      fallbackStatus = "unknown";
+    }
+  }
+
+  return fallbackStatus;
+}
+
+async function createTaskSession(
+  factory: ChromeAiFactory<unknown>,
+  definition: CapabilityDefinition,
+  locale: Locale,
+  copy: Record<string, string>,
+  onProgress?: (progress: TaskProgress) => void,
+  text?: string,
+) {
+  const candidates = getOptionCandidates(definition, locale, text);
+  let lastError: unknown;
+
+  for (const candidate of candidates) {
+    try {
+      onProgress?.({ message: copy.checkingAvailability });
+      if (factory.availability) {
+        const availability = await factory.availability(candidate.availabilityOptions);
+        if (availability === "unavailable") {
+          continue;
+        }
+      }
+
+      onProgress?.({ message: copy.creatingSession });
+      return await factory.create({
+        ...candidate.createOptions,
+        monitor(monitor) {
+          monitor.addEventListener("downloadprogress", (event) => {
+            const loaded = typeof event.loaded === "number" ? event.loaded : undefined;
+            const total = typeof event.total === "number" && event.total > 0 ? event.total : undefined;
+            onProgress?.({
+              message: copy.downloadingModel,
+              ratio: total ? loaded! / total : loaded,
+            });
+          });
+        },
+      });
+    } catch (reason) {
+      lastError = reason;
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+
+  throw new Error(`${definition.label} ${copy.apiUnavailable}.`);
+}
+
+function getOptionCandidates(definition: CapabilityDefinition, locale: Locale, text?: string): ChromeAiOptionCandidate[] {
+  return definition.getOptionCandidates?.(locale, text) ?? [
+    {
+      availabilityOptions: definition.availabilityOptions,
+      createOptions: definition.createOptions,
+    },
+  ];
+}
+
+function detectTranslationDirection(text: string, locale: Locale): "zh-to-en" | "en-to-zh" {
+  if (!text.trim()) {
+    return locale === "zh" ? "en-to-zh" : "zh-to-en";
+  }
+
+  const cjkMatches = text.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  const latinMatches = text.match(/[A-Za-z]/g)?.length ?? 0;
+
+  if (cjkMatches > 0 && cjkMatches >= latinMatches * 0.25) {
+    return "zh-to-en";
+  }
+
+  return "en-to-zh";
+}
+
+function buildFallbackPrompt(task: Exclude<AiTask, "prompt" | "detect-language">, text: string, locale: Locale) {
+  const direction = detectTranslationDirection(text, locale);
+  const prompts: Record<Locale, Record<Exclude<AiTask, "prompt" | "detect-language">, string>> = {
+    zh: {
+      summarize: `请用中文把下面内容总结为清晰的要点，保留关键信息：\n\n${text}`,
+      translate:
+        direction === "zh-to-en"
+          ? `请把下面中文翻译成自然准确的英文，只输出译文：\n\n${text}`
+          : `请把下面英文翻译成自然准确的中文，只输出译文：\n\n${text}`,
+      write: `请根据下面要求写一段清晰、自然、可直接使用的文本：\n\n${text}`,
+      rewrite: `请把下面文本润色改写为更清晰自然的表达，尽量保持原意和长度，只输出改写结果：\n\n${text}`,
+    },
+    en: {
+      summarize: `Summarize the following content into clear bullet points while preserving key details:\n\n${text}`,
+      translate:
+        direction === "zh-to-en"
+          ? `Translate the following Chinese text into natural, accurate English. Only output the translation:\n\n${text}`
+          : `Translate the following English text into natural, accurate Chinese. Only output the translation:\n\n${text}`,
+      write: `Write clear, natural, ready-to-use text based on this request:\n\n${text}`,
+      rewrite: `Polish the following text for clearer, more natural wording. Keep the original meaning and roughly the same length. Only output the rewritten text:\n\n${text}`,
+    },
+  };
+
+  return prompts[locale][task];
 }
 
 async function executeSessionTask(task: AiTask, session: unknown, text: string, locale: Locale): Promise<string> {

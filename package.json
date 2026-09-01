@@ -9,7 +9,12 @@
     "build": "tsc && vite build",
     "build:extension": "npm run build",
     "preview": "vite preview --host 127.0.0.1",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.mjs",
+    "test:prompt": "node --test tests/assistantPrompt.test.mjs",
+    "test:intent": "node --test tests/assistantIntent.test.mjs",
+    "test:planner": "node --test tests/assistantPlanner.test.mjs",
+    "test:executor": "node --test tests/assistantDeterministicExecutor.test.mjs"
   },
   "keywords": [
     "chrome",

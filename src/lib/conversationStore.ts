@@ -1,4 +1,9 @@
 import type { Locale } from "./chromeAi";
+import type { AiTask } from "./chromeAi";
+import type { DeterministicExecution } from "./assistantDeterministicExecutor";
+import type { AssistantIntent } from "./assistantIntent";
+import type { AssistantPlan } from "./assistantPlanner";
+import type { KnowledgeMatch } from "./knowledgeStore";
 
 export type StoredChatMessage = {
   id: string;
@@ -11,15 +16,51 @@ export type StoredChatMessage = {
   }>;
 };
 
+export type ConversationStatus =
+  | "idle"
+  | "queued"
+  | "checking"
+  | "creating-session"
+  | "downloading"
+  | "running"
+  | "failed"
+  | "completed";
+
+export type StoredTaskState = {
+  id: string;
+  kind: "chat" | "text-action" | "web-page";
+  aiTask: AiTask;
+  status: ConversationStatus;
+  originalInput: string;
+  promptText: string;
+  sources: KnowledgeMatch[];
+  intent?: AssistantIntent;
+  plan?: AssistantPlan;
+  deterministicExecution?: DeterministicExecution;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+};
+
 export type StoredConversation = {
   id: string;
   title: string;
   locale: Locale;
   messages: StoredChatMessage[];
-  status?: "idle" | "running";
+  status?: ConversationStatus;
+  taskState?: StoredTaskState;
   createdAt: number;
   updatedAt: number;
 };
+
+export function isConversationActive(status: ConversationStatus | undefined) {
+  return status === "queued" ||
+    status === "checking" ||
+    status === "creating-session" ||
+    status === "downloading" ||
+    status === "running";
+}
 
 const DB_NAME = "local-ai";
 const DB_VERSION = 1;
