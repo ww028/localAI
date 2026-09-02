@@ -1,5 +1,10 @@
 import {
   Brain,
+  AlertCircle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Circle,
   Clipboard,
   Database,
   Download,
@@ -15,6 +20,7 @@ import {
   WandSparkles,
   SquareArrowOutUpRight,
   LoaderCircle,
+  ListChecks,
   Menu,
   PanelLeft,
   PanelRightOpen,
@@ -23,6 +29,7 @@ import {
   Send,
   SquarePen,
   Trash2,
+  Wrench,
   X,
 } from "lucide-react";
 import { type CSSProperties, type KeyboardEvent, type PointerEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -51,22 +58,28 @@ import {
   formatDeterministicExecution,
 } from "./lib/assistantDeterministicExecutor";
 import {
+  type ContextMemoryOperation,
   type ContextPlan,
   createContextPlan,
+  createMemoryOperationPlan,
   shouldExpandMemorySearch,
 } from "./lib/assistantContextPlan";
 import { detectAssistantIntent } from "./lib/assistantIntent";
-import { createAssistantPlan } from "./lib/assistantPlanner";
+import { type AssistantPlanStep, type AssistantPlanStepStatus, createAssistantPlan } from "./lib/assistantPlanner";
 import { searchBuiltinKnowledge } from "./lib/builtinKnowledge";
 import {
   type AssistantMemory,
-  type AssistantMemoryCommand,
+  type AssistantMemoryConflict,
+  type AssistantMemorySuggestion,
   type AssistantMemoryType,
+  classifyMemoryType,
   deleteAssistantMemory,
-  deleteAssistantMemoriesByQuery,
+  deleteAssistantMemoriesByQueries,
+  detectAssistantMemorySuggestion,
   exportAssistantMemories,
+  findAssistantMemoryConflicts,
+  importAssistantMemories,
   listAssistantMemories,
-  parseAssistantMemoryCommand,
   saveAssistantMemory,
   searchAssistantMemories,
   updateAssistantMemory,
@@ -105,7 +118,36 @@ type WebPageSnapshot = {
 const SURFACE_CHANNEL = "localai-surface";
 const LOCALE_STORAGE_KEY = "localai-locale";
 const SIDEPANEL_WIDTH_GUIDE_STORAGE_KEY = "localai-sidepanel-width-guide-dismissed";
+const MEMORY_AUTO_SAVE_PREFERENCES_KEY = "localai-memory-auto-save-preferences";
 const MAX_PAGE_CONTEXT_LENGTH = 16000;
+
+type PendingMemoryReview = {
+  suggestion: AssistantMemorySuggestion;
+  conflicts: AssistantMemoryConflict[];
+};
+
+type MemoryOperationExecutionResult =
+  | {
+      action: "remember";
+      savedMemory?: AssistantMemory;
+      updatedMemory?: AssistantMemory;
+      previousMemory?: AssistantMemory;
+      decision?: "saved" | "updated" | "merged" | "kept_both" | "needs_confirmation";
+      success: boolean;
+    }
+  | {
+      action: "forget";
+      deletedMemories: AssistantMemory[];
+      success: boolean;
+    };
+
+type RememberWriteDecision = {
+  action: "save_new" | "replace_existing" | "merge_with_existing" | "keep_both" | "ask_user";
+  existingMemoryId?: string;
+  content?: string;
+  memoryType?: AssistantMemoryType;
+  rationale?: string;
+};
 
 const translations: Record<
   Locale,
@@ -173,6 +215,20 @@ const translations: Record<
     taskError: string;
     continueTask: string;
     taskResumed: string;
+    taskCardTitle: string;
+    taskDetails: string;
+    hideTaskDetails: string;
+    intentLabel: string;
+    planLabel: string;
+    toolsLabel: string;
+    copyError: string;
+    errorCopied: string;
+    deterministicDetails: string;
+    rawInput: string;
+    parsedResult: string;
+    finalResult: string;
+    noTaskPlan: string;
+    planStepStatusLabels: Record<string, string>;
     memorySaved: string;
     memoryDeleted: string;
     memoryNotFound: string;
@@ -183,6 +239,20 @@ const translations: Record<
     saveMemory: string;
     cancelEdit: string;
     exportMemories: string;
+    importMemories: string;
+    memoryImported: string;
+    memoryImportInvalid: string;
+    searchMemories: string;
+    memoryTypeAll: string;
+    memorySuggestion: string;
+    memoryConflict: string;
+    acceptMemory: string;
+    ignoreMemory: string;
+    mergeMemory: string;
+    overwriteMemory: string;
+    keepBothMemories: string;
+    autoSavePreferences: string;
+    memoryHitExplanation: string;
     memoryUpdated: string;
     summarizeText: string;
     translateText: string;
@@ -274,6 +344,26 @@ const translations: Record<
     taskError: "AI 任务执行失败。",
     continueTask: "继续任务",
     taskResumed: "任务已继续",
+    taskCardTitle: "当前任务",
+    taskDetails: "查看任务详情",
+    hideTaskDetails: "收起任务详情",
+    intentLabel: "意图",
+    planLabel: "计划",
+    toolsLabel: "工具",
+    copyError: "复制错误",
+    errorCopied: "错误已复制",
+    deterministicDetails: "确定性执行详情",
+    rawInput: "原始输入",
+    parsedResult: "解析结果",
+    finalResult: "最终结果",
+    noTaskPlan: "此任务没有结构化计划。",
+    planStepStatusLabels: {
+      pending: "待处理",
+      ready: "就绪",
+      blocked: "阻塞",
+      completed: "完成",
+      failed: "失败",
+    },
     memorySaved: "已记住",
     memoryDeleted: "已删除相关记忆",
     memoryNotFound: "没有找到相关记忆",
@@ -284,6 +374,20 @@ const translations: Record<
     saveMemory: "保存记忆",
     cancelEdit: "取消编辑",
     exportMemories: "导出记忆",
+    importMemories: "导入记忆",
+    memoryImported: "记忆已导入",
+    memoryImportInvalid: "记忆导入文件格式不合规",
+    searchMemories: "搜索记忆",
+    memoryTypeAll: "全部类型",
+    memorySuggestion: "是否记住这条信息？",
+    memoryConflict: "发现相似记忆",
+    acceptMemory: "记住",
+    ignoreMemory: "忽略",
+    mergeMemory: "合并",
+    overwriteMemory: "覆盖",
+    keepBothMemories: "保留两条",
+    autoSavePreferences: "自动记住低风险偏好",
+    memoryHitExplanation: "使用的个人记忆",
     memoryUpdated: "记忆已更新",
     summarizeText: "摘要文本",
     translateText: "中英互译",
@@ -374,6 +478,26 @@ const translations: Record<
     taskError: "AI task failed.",
     continueTask: "Resume task",
     taskResumed: "Task resumed",
+    taskCardTitle: "Current task",
+    taskDetails: "Task details",
+    hideTaskDetails: "Hide details",
+    intentLabel: "Intent",
+    planLabel: "Plan",
+    toolsLabel: "Tools",
+    copyError: "Copy error",
+    errorCopied: "Error copied",
+    deterministicDetails: "Deterministic execution details",
+    rawInput: "Raw input",
+    parsedResult: "Parsed result",
+    finalResult: "Final result",
+    noTaskPlan: "This task has no structured plan.",
+    planStepStatusLabels: {
+      pending: "Pending",
+      ready: "Ready",
+      blocked: "Blocked",
+      completed: "Completed",
+      failed: "Failed",
+    },
     memorySaved: "Memory saved",
     memoryDeleted: "Deleted related memories",
     memoryNotFound: "No related memory found",
@@ -384,6 +508,20 @@ const translations: Record<
     saveMemory: "Save memory",
     cancelEdit: "Cancel edit",
     exportMemories: "Export memories",
+    importMemories: "Import memories",
+    memoryImported: "Memories imported",
+    memoryImportInvalid: "Memory import file format is invalid",
+    searchMemories: "Search memories",
+    memoryTypeAll: "All types",
+    memorySuggestion: "Remember this information?",
+    memoryConflict: "Similar memory found",
+    acceptMemory: "Remember",
+    ignoreMemory: "Ignore",
+    mergeMemory: "Merge",
+    overwriteMemory: "Overwrite",
+    keepBothMemories: "Keep both",
+    autoSavePreferences: "Auto-save low-risk preferences",
+    memoryHitExplanation: "Personal memories used",
     memoryUpdated: "Memory updated",
     summarizeText: "Summarize text",
     translateText: "Translate zh/en",
@@ -498,6 +636,22 @@ function saveSidePanelWidthGuideDismissed() {
   }
 }
 
+function getAutoSavePreferenceMemories() {
+  try {
+    return window.localStorage.getItem(MEMORY_AUTO_SAVE_PREFERENCES_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function saveAutoSavePreferenceMemories(enabled: boolean) {
+  try {
+    window.localStorage.setItem(MEMORY_AUTO_SAVE_PREFERENCES_KEY, String(enabled));
+  } catch {
+    // Memory suggestions can still work without persisting this preference.
+  }
+}
+
 export function App() {
   const [surface] = useState<Surface>(() => getInitialSurface());
   const canResizeComposer = surface !== "popup";
@@ -523,6 +677,10 @@ export function App() {
   const [newKnowledgeSpaceName, setNewKnowledgeSpaceName] = useState("");
   const [isRebuildingKnowledge, setIsRebuildingKnowledge] = useState(false);
   const [assistantMemories, setAssistantMemories] = useState<AssistantMemory[]>([]);
+  const [memorySearchQuery, setMemorySearchQuery] = useState("");
+  const [memoryTypeFilter, setMemoryTypeFilter] = useState<AssistantMemoryType | "all">("all");
+  const [pendingMemoryReview, setPendingMemoryReview] = useState<PendingMemoryReview | undefined>();
+  const [autoSavePreferenceMemories, setAutoSavePreferenceMemories] = useState(() => getAutoSavePreferenceMemories());
   const [editingMemoryId, setEditingMemoryId] = useState<string | undefined>();
   const [editingMemoryContent, setEditingMemoryContent] = useState("");
   const [editingMemoryType, setEditingMemoryType] = useState<AssistantMemoryType>("fact");
@@ -537,9 +695,12 @@ export function App() {
     index: number;
     source: MessageSource;
   } | undefined>();
+  const [isTaskDetailsOpen, setIsTaskDetailsOpen] = useState(false);
+  const [isDeterministicDetailsOpen, setIsDeterministicDetailsOpen] = useState(false);
   const [composerHeight, setComposerHeight] = useState(() => getDefaultComposerHeight(surface));
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const memoryImportInputRef = useRef<HTMLInputElement | null>(null);
   const dataImportInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSaveRef = useRef(false);
   const composerHeightRef = useRef(composerHeight);
@@ -579,6 +740,11 @@ export function App() {
   useEffect(() => {
     composerHeightRef.current = composerHeight;
   }, [composerHeight]);
+
+  useEffect(() => {
+    setIsTaskDetailsOpen(false);
+    setIsDeterministicDetailsOpen(false);
+  }, [taskState?.id]);
 
   useEffect(() => {
     if (!openPopover) {
@@ -729,6 +895,24 @@ export function App() {
     setAssistantMemories(await listAssistantMemories());
   }
 
+  async function reviewPotentialMemory(inputText: string) {
+    const suggestion = detectAssistantMemorySuggestion(inputText, locale);
+    if (!suggestion) {
+      return;
+    }
+
+    const conflicts = await findAssistantMemoryConflicts(suggestion.content, suggestion.type);
+    if (suggestion.risk === "low" && suggestion.type === "preference" && autoSavePreferenceMemories && !conflicts.length) {
+      await saveAssistantMemory(suggestion.content, suggestion.type);
+      await refreshAssistantMemories();
+      setToast(copy.memorySaved);
+      return;
+    }
+
+    setPendingMemoryReview({ suggestion, conflicts });
+    setOpenPopover("memory");
+  }
+
   async function loadLatestConversation() {
     const conversations = await listConversations();
     setHistory(conversations);
@@ -809,15 +993,64 @@ export function App() {
 
     pendingSaveRef.current = true;
     const nextMessages = [...messages, userMessage];
-    const memoryCommand = parseAssistantMemoryCommand(trimmedInput);
-    if (memoryCommand) {
-      await handleMemoryCommand(memoryCommand, nextMessages, trimmedInput);
-      return;
+    setMessages(nextMessages);
+    setProgress(locale === "zh" ? "后台推理中" : "Running in background");
+
+    const intent = detectAssistantIntent(trimmedInput, locale);
+    const plan = createAssistantPlan(intent, trimmedInput, locale);
+    if (intent.type === "memory_operation") {
+      const now = Date.now();
+      const queuedTaskState = createStoredTaskState({
+        kind: "chat",
+        aiTask: "prompt",
+        status: "queued",
+        originalInput: trimmedInput,
+        promptText: trimmedInput,
+        sources: [],
+        intent,
+        plan,
+        now,
+      });
+      const queuedConversation: StoredConversation = {
+        id: conversationId,
+        title: trimmedInput.slice(0, 48),
+        locale,
+        messages: nextMessages,
+        status: "queued",
+        taskState: queuedTaskState,
+        createdAt: conversationCreatedAt,
+        updatedAt: now,
+      };
+
+      setConversationStatus(queuedConversation.status);
+      setTaskState(queuedTaskState);
+      await saveConversation(queuedConversation);
+      await refreshHistory();
+
+      const memoryOperation = await planMemoryOperationWithModel(
+        trimmedInput,
+        locale,
+        createMemoryOperationPlan(trimmedInput, locale, intent),
+        (nextProgress) => setProgress(nextProgress),
+      );
+      const contextPlan = createContextPlan({
+        question: trimmedInput,
+        locale,
+        intent,
+        sources: [],
+        memories: [],
+        memoryOperation,
+      });
+      if (contextPlan.memoryOperation.action !== "none") {
+        await handleMemoryOperationPlan(contextPlan.memoryOperation, plan, queuedTaskState, nextMessages, trimmedInput);
+        return;
+      }
     }
 
     const sources = await resolveKnowledgeSources(trimmedInput, locale, activeKnowledgeSpaceId);
-    const intent = detectAssistantIntent(trimmedInput, locale);
-    const memoryContext = await resolveAssistantMemories(trimmedInput, locale);
+    const memoryContext = intent.type === "memory_operation"
+      ? { promptMemories: [], sourceMemories: [] }
+      : await resolveAssistantMemories(trimmedInput, locale);
     const contextPlan = createContextPlan({
       question: trimmedInput,
       locale,
@@ -826,6 +1059,11 @@ export function App() {
       memories: memoryContext.promptMemories,
       sourceMemories: memoryContext.sourceMemories,
     });
+    if (contextPlan.memoryOperation.action !== "none") {
+      await handleMemoryOperationPlan(contextPlan.memoryOperation, plan, undefined, nextMessages, trimmedInput);
+      return;
+    }
+    await reviewPotentialMemory(trimmedInput);
     const messageSources = createMessageSources(sources, memoryContext.sourceMemories, contextPlan, locale);
     const noLocalContextAnswer = createNoLocalEntityAnswer(contextPlan, messageSources, locale);
     if (noLocalContextAnswer) {
@@ -859,7 +1097,6 @@ export function App() {
       await refreshHistory();
       return;
     }
-    const plan = createAssistantPlan(intent, trimmedInput, locale);
     const deterministicExecution = executeDeterministicTask(trimmedInput, intent, plan, locale);
     const prompt = buildAssistantPrompt({
       question: trimmedInput,
@@ -1347,10 +1584,54 @@ export function App() {
     }
   }
 
-  async function handleMemoryCommand(command: AssistantMemoryCommand, nextMessages: ChatMessage[], title: string) {
+  async function handleMemoryOperationPlan(
+    operation: Exclude<ContextMemoryOperation, { action: "none" }>,
+    plan: ReturnType<typeof createAssistantPlan>,
+    queuedTaskState: StoredTaskState | undefined,
+    nextMessages: ChatMessage[],
+    title: string,
+  ) {
     try {
-      const resultText = await executeMemoryCommand(command, locale);
+      let executionResult: MemoryOperationExecutionResult | undefined;
+      if (operation.action === "remember") {
+        executionResult = await executeMemoryOperation(operation, locale);
+        if (executionResult.action === "remember" && executionResult.decision === "needs_confirmation") {
+          const suggestion: AssistantMemorySuggestion = {
+            type: operation.memoryType ?? classifyMemoryType(operation.content),
+            content: operation.content,
+            confidence: operation.confidence,
+            risk: "medium",
+            rationale: operation.rationale,
+          };
+          const conflicts = await findAssistantMemoryConflicts(suggestion.content, suggestion.type);
+          setPendingMemoryReview({ suggestion, conflicts });
+          setOpenPopover("memory");
+        }
+      } else {
+        executionResult = await executeMemoryOperation(operation, locale);
+      }
+      const resultText = await createMemoryOperationReply(operation, executionResult, locale);
       const now = Date.now();
+      const completedTaskState = updateStoredTaskState(queuedTaskState, "completed") ?? createStoredTaskState({
+        kind: "chat",
+        aiTask: "prompt",
+        status: "completed",
+        originalInput: title,
+        promptText: resultText,
+        sources: [],
+        intent: {
+          type: "memory_operation",
+          confidence: operation.confidence,
+          executionMode: "deterministic",
+          requiredTools: ["memory-planner", "memory-store"],
+          entities: operation.action === "remember"
+            ? { content: operation.content, targets: operation.targets.join(", ") }
+            : { query: operation.query, targets: operation.targets.join(", ") },
+          rationale: operation.rationale,
+        },
+        plan,
+        now,
+      });
       const completedConversation: StoredConversation = {
         id: conversationId,
         title: title.slice(0, 48),
@@ -1364,6 +1645,21 @@ export function App() {
           },
         ],
         status: "completed",
+        taskState: {
+          ...completedTaskState,
+          promptText: resultText,
+          intent: {
+            type: "memory_operation",
+            confidence: operation.confidence,
+            executionMode: "deterministic",
+            requiredTools: ["memory-planner", "memory-store"],
+            entities: operation.action === "remember"
+              ? { content: operation.content, targets: operation.targets.join(", ") }
+              : { query: operation.query, targets: operation.targets.join(", ") },
+            rationale: operation.rationale,
+          },
+          plan,
+        },
         createdAt: conversationCreatedAt,
         updatedAt: now,
       };
@@ -1414,19 +1710,28 @@ export function App() {
 
   async function copyMessage(text: string) {
     try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const textarea = document.createElement("textarea");
-      textarea.value = text;
-      textarea.style.position = "fixed";
-      textarea.style.opacity = "0";
-      document.body.appendChild(textarea);
-      textarea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textarea);
+      await writeClipboardText(text);
+      setToast(copy.copied);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : copy.taskError;
+      setError(message);
+      setToast(message);
+    }
+  }
+
+  async function copyTaskError() {
+    if (!taskState?.error) {
+      return;
     }
 
-    setToast(copy.copied);
+    try {
+      await writeClipboardText(taskState.error);
+      setToast(copy.errorCopied);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : copy.taskError;
+      setError(message);
+      setToast(message);
+    }
   }
 
   function downloadMessageAsWord(message: ChatMessage) {
@@ -1772,6 +2077,78 @@ export function App() {
     setToast(copy.exportMemories);
   }
 
+  async function handleMemoryImport(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const result = await importAssistantMemories(await file.text());
+      await refreshAssistantMemories();
+      setToast(`${copy.memoryImported}: ${result.imported}`);
+    } catch (reason) {
+      const message = reason instanceof Error ? `${copy.memoryImportInvalid}: ${reason.message}` : copy.memoryImportInvalid;
+      setError(message);
+      setToast(message);
+    } finally {
+      if (memoryImportInputRef.current) {
+        memoryImportInputRef.current.value = "";
+      }
+    }
+  }
+
+  function handleAutoSavePreferenceChange(enabled: boolean) {
+    saveAutoSavePreferenceMemories(enabled);
+    setAutoSavePreferenceMemories(enabled);
+  }
+
+  async function acceptMemorySuggestion() {
+    if (!pendingMemoryReview) {
+      return;
+    }
+
+    await saveAssistantMemory(pendingMemoryReview.suggestion.content, pendingMemoryReview.suggestion.type);
+    setPendingMemoryReview(undefined);
+    await refreshAssistantMemories();
+    setToast(copy.memorySaved);
+  }
+
+  function ignoreMemorySuggestion() {
+    setPendingMemoryReview(undefined);
+  }
+
+  async function mergeMemorySuggestion() {
+    const conflict = pendingMemoryReview?.conflicts[0];
+    if (!pendingMemoryReview || !conflict) {
+      return;
+    }
+
+    const mergedContent = mergeMemoryContent(conflict.memory.content, pendingMemoryReview.suggestion.content);
+    await updateAssistantMemory(conflict.memory.id, {
+      content: mergedContent,
+      type: pendingMemoryReview.suggestion.type,
+    });
+    setPendingMemoryReview(undefined);
+    await refreshAssistantMemories();
+    setToast(copy.memoryUpdated);
+  }
+
+  async function overwriteMemorySuggestion() {
+    const conflict = pendingMemoryReview?.conflicts[0];
+    if (!pendingMemoryReview || !conflict) {
+      return;
+    }
+
+    await updateAssistantMemory(conflict.memory.id, {
+      content: pendingMemoryReview.suggestion.content,
+      type: pendingMemoryReview.suggestion.type,
+    });
+    setPendingMemoryReview(undefined);
+    await refreshAssistantMemories();
+    setToast(copy.memoryUpdated);
+  }
+
   async function handleDataExport() {
     setOpenPopover(undefined);
     try {
@@ -1947,10 +2324,11 @@ export function App() {
       } as CSSProperties)
     : undefined;
   const canContinueTask = Boolean(taskState && conversationStatus === "failed" && !isRunning);
-  const shouldShowTaskStatus = Boolean(taskState && conversationStatus && conversationStatus !== "completed");
+  const shouldShowTaskCard = Boolean(taskState && conversationStatus === "failed");
   const taskStatusText = taskState && conversationStatus
     ? `${formatTaskKind(taskState.kind, locale)} · ${formatTaskStatus(conversationStatus, locale)}`
     : "";
+  const taskDetailsOpen = isTaskDetailsOpen;
 
   function selectConversation(conversation: StoredConversation) {
     pendingSaveRef.current = false;
@@ -1987,9 +2365,175 @@ export function App() {
     ));
   }
 
+  function renderTaskCard() {
+    if (!taskState || conversationStatus !== "failed") {
+      return null;
+    }
+
+    const planSteps = getTaskPlanSteps(taskState, locale);
+    const tools = taskState.plan?.requiredTools.length
+      ? taskState.plan.requiredTools
+      : [formatAiTaskTool(taskState.aiTask)];
+    const intentLabel = taskState.intent?.type ?? formatTaskKind(taskState.kind, locale);
+    const deterministicExecution = taskState.deterministicExecution;
+
+    return (
+      <section
+        className={`task-card ${conversationStatus === "failed" ? "failed" : ""} ${
+          taskDetailsOpen ? "expanded" : "collapsed"
+        }`}
+        aria-label={copy.taskCardTitle}
+      >
+        <div className="task-card-header">
+          <div className="task-card-title">
+            <ListChecks size={18} />
+            <div>
+              <strong>{copy.taskCardTitle}</strong>
+              <span>{taskStatusText}</span>
+            </div>
+          </div>
+          <span className={`task-status-pill ${conversationStatus}`}>
+            {formatTaskStatus(conversationStatus, locale)}
+          </span>
+        </div>
+        <div className="task-card-actions">
+          {canContinueTask ? (
+            <button className="task-action-primary" type="button" onClick={() => void handleContinueTask()}>
+              <RotateCcw size={15} />
+              {copy.continueTask}
+            </button>
+          ) : null}
+          {conversationStatus === "failed" && taskState.error ? (
+            <button className="task-action-secondary" type="button" onClick={() => void copyTaskError()}>
+              <Clipboard size={15} />
+              {copy.copyError}
+            </button>
+          ) : null}
+          <button className="task-action-secondary" type="button" onClick={() => setIsTaskDetailsOpen((current) => !current)}>
+            {taskDetailsOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+            {taskDetailsOpen ? copy.hideTaskDetails : copy.taskDetails}
+          </button>
+        </div>
+        {taskDetailsOpen ? (
+          <div className="task-card-details">
+            <div className="task-card-summary">
+              <div>
+                <span>{copy.intentLabel}</span>
+                <strong>{intentLabel}</strong>
+              </div>
+              <div>
+                <span>{copy.toolsLabel}</span>
+                <strong>{tools.join(", ")}</strong>
+              </div>
+            </div>
+            <p className="task-card-input">{taskState.originalInput}</p>
+            <section className="task-detail-section">
+              <h3>{copy.planLabel}</h3>
+              {planSteps.length ? (
+                <ol className="task-plan-list">
+                  {planSteps.map((step) => (
+                    <li key={step.id} className={`task-plan-step ${step.status}`}>
+                      {getPlanStepIcon(step.status)}
+                      <div>
+                        <strong>{step.title}</strong>
+                        <span>{step.description}</span>
+                      </div>
+                      <em>{copy.planStepStatusLabels[step.status] ?? step.status}</em>
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="task-detail-empty">{copy.noTaskPlan}</p>
+              )}
+            </section>
+            {deterministicExecution?.handled ? (
+              <section className="task-detail-section deterministic-section">
+                <button
+                  type="button"
+                  className="deterministic-toggle"
+                  onClick={() => setIsDeterministicDetailsOpen((current) => !current)}
+                  aria-expanded={isDeterministicDetailsOpen}
+                >
+                  {isDeterministicDetailsOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                  <Wrench size={15} />
+                  <span>{copy.deterministicDetails}</span>
+                </button>
+                {isDeterministicDetailsOpen ? (
+                  <div className="deterministic-detail-grid">
+                    <div>
+                      <span>{copy.rawInput}</span>
+                      <pre>{taskState.originalInput}</pre>
+                    </div>
+                    <div>
+                      <span>{copy.parsedResult}</span>
+                      <pre>{formatJsonForDisplay(deterministicExecution.resultData ?? deterministicExecution.error ?? {})}</pre>
+                    </div>
+                    <div>
+                      <span>{copy.finalResult}</span>
+                      <pre>{deterministicExecution.resultText ?? deterministicExecution.error ?? ""}</pre>
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+            {taskState.error ? (
+              <section className="task-detail-section">
+                <h3>{copy.taskError}</h3>
+                <pre className="task-error-detail">{taskState.error}</pre>
+              </section>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   const filteredHistory = historySearchQuery.trim()
     ? history.filter((conversation) => conversation.title.toLowerCase().includes(historySearchQuery.trim().toLowerCase()))
     : history;
+  const filteredAssistantMemories = assistantMemories.filter((memory) => {
+    const matchesType = memoryTypeFilter === "all" || memory.type === memoryTypeFilter;
+    const query = memorySearchQuery.trim().toLowerCase();
+    const matchesQuery = !query ||
+      memory.content.toLowerCase().includes(query) ||
+      formatMemoryType(memory.type, locale).toLowerCase().includes(query);
+
+    return matchesType && matchesQuery;
+  });
+
+  function renderMemoryReview() {
+    if (!pendingMemoryReview) {
+      return null;
+    }
+
+    const primaryConflict = pendingMemoryReview.conflicts[0];
+    return (
+      <div className="memory-review">
+        <div className="memory-review-header">
+          <strong>{primaryConflict ? copy.memoryConflict : copy.memorySuggestion}</strong>
+          <button type="button" onClick={ignoreMemorySuggestion} title={copy.ignoreMemory} aria-label={copy.ignoreMemory}>
+            <X size={15} />
+          </button>
+        </div>
+        <p>{pendingMemoryReview.suggestion.content}</p>
+        {primaryConflict ? (
+          <blockquote>{primaryConflict.memory.content}</blockquote>
+        ) : null}
+        <div className="memory-review-actions">
+          {primaryConflict ? (
+            <>
+              <button type="button" onClick={() => void mergeMemorySuggestion()}>{copy.mergeMemory}</button>
+              <button type="button" onClick={() => void overwriteMemorySuggestion()}>{copy.overwriteMemory}</button>
+              <button type="button" onClick={() => void acceptMemorySuggestion()}>{copy.keepBothMemories}</button>
+            </>
+          ) : (
+            <button type="button" onClick={() => void acceptMemorySuggestion()}>{copy.acceptMemory}</button>
+          )}
+          <button type="button" onClick={ignoreMemorySuggestion}>{copy.ignoreMemory}</button>
+        </div>
+      </div>
+    );
+  }
 
   function renderSettingsPopover() {
     return (
@@ -2196,7 +2740,7 @@ export function App() {
         </header>
 
         <section
-          className={`panel chat-panel ${shouldShowTaskStatus ? "has-task-state" : ""} ${
+          className={`panel chat-panel ${shouldShowTaskCard ? "has-task-state" : ""} ${
             isEmptyConversation ? "empty-chat" : ""
           }`}
           aria-label={copy.chatLabel}
@@ -2216,26 +2760,13 @@ export function App() {
             </div>
           )}
 
-          {!shouldShowTaskStatus && (promptStatus === "missing" || promptStatus === "unavailable") ? (
+          {!shouldShowTaskCard && (promptStatus === "missing" || promptStatus === "unavailable") ? (
             <div className={`status-banner ${getStatusTone(promptStatus as CapabilityStatus["availability"])}`}>
               {copy.unavailableHint}
             </div>
           ) : null}
 
-          {shouldShowTaskStatus ? (
-            <div className={`task-state-banner ${conversationStatus === "failed" ? "failed" : ""}`}>
-              <div>
-                <strong>{taskStatusText}</strong>
-                <span>{taskState?.originalInput}</span>
-              </div>
-              {canContinueTask ? (
-                <button type="button" onClick={() => void handleContinueTask()}>
-                  <RotateCcw size={15} />
-                  {copy.continueTask}
-                </button>
-              ) : null}
-            </div>
-          ) : null}
+          {renderTaskCard()}
 
           <div ref={messageListRef} className="message-list" aria-live="polite">
             {isEmptyConversation ? (
@@ -2295,7 +2826,7 @@ export function App() {
                     {message.role === "assistant" && message.sources?.length ? (
                       <>
                         <div className="message-sources">
-	                          <span className="message-sources-label">{copy.references}</span>
+	                          <span className="message-sources-label">{formatMessageSourcesHeading(message.sources, locale)}</span>
                           {message.sources.map((source, index) => (
                             <button
                               type="button"
@@ -2591,20 +3122,63 @@ export function App() {
                         <strong>{copy.memories}</strong>
                         <span>{assistantMemories.length}</span>
                       </div>
-                      <button
-                        className="memory-header-action"
-                        type="button"
-                        onClick={() => void handleMemoryExport()}
-                        disabled={!assistantMemories.length}
-                        title={copy.exportMemories}
-                        aria-label={copy.exportMemories}
-                      >
-                        <Download size={17} />
-                      </button>
+                      <div className="memory-header-actions">
+                        <button
+                          className="memory-header-action"
+                          type="button"
+                          onClick={() => memoryImportInputRef.current?.click()}
+                          title={copy.importMemories}
+                          aria-label={copy.importMemories}
+                        >
+                          <Upload size={17} />
+                        </button>
+                        <button
+                          className="memory-header-action"
+                          type="button"
+                          onClick={() => void handleMemoryExport()}
+                          disabled={!assistantMemories.length}
+                          title={copy.exportMemories}
+                          aria-label={copy.exportMemories}
+                        >
+                          <Download size={17} />
+                        </button>
+                      </div>
+                    </div>
+                    {renderMemoryReview()}
+                    <div className="memory-filter">
+                      <label className="memory-search-field">
+                        <Search size={15} />
+                        <input
+                          value={memorySearchQuery}
+                          onChange={(event) => setMemorySearchQuery(event.target.value)}
+                          placeholder={copy.searchMemories}
+                          aria-label={copy.searchMemories}
+                        />
+                      </label>
+                      <div className="memory-type-segments" aria-label={copy.memoryTypeAll}>
+                        {(["all", "preference", "fact", "project", "task"] as Array<AssistantMemoryType | "all">).map((type) => (
+                          <button
+                            type="button"
+                            key={type}
+                            className={memoryTypeFilter === type ? "active" : undefined}
+                            onClick={() => setMemoryTypeFilter(type)}
+                          >
+                            {type === "all" ? copy.memoryTypeAll : formatMemoryType(type, locale)}
+                          </button>
+                        ))}
+                      </div>
+                      <label className="memory-toggle">
+                        <input
+                          type="checkbox"
+                          checked={autoSavePreferenceMemories}
+                          onChange={(event) => handleAutoSavePreferenceChange(event.target.checked)}
+                        />
+                        <span>{copy.autoSavePreferences}</span>
+                      </label>
                     </div>
                     <div className="memory-list" role="list">
-                      {assistantMemories.length ? (
-                        assistantMemories.map((memory) => {
+                      {filteredAssistantMemories.length ? (
+                        filteredAssistantMemories.map((memory) => {
                           const isEditing = editingMemoryId === memory.id;
 
                           return (
@@ -2714,6 +3288,13 @@ export function App() {
             accept=".md,.txt,text/markdown,text/plain"
             multiple
             onChange={(event) => void handleKnowledgeImport(event.target.files)}
+          />
+          <input
+            ref={memoryImportInputRef}
+            className="sr-only"
+            type="file"
+            accept=".json,application/json"
+            onChange={(event) => void handleMemoryImport(event.target.files)}
           />
           <input
             ref={dataImportInputRef}
@@ -2827,6 +3408,125 @@ function formatTaskKind(kind: StoredTaskState["kind"], locale: Locale) {
   return labels[kind][locale];
 }
 
+function getTaskPlanSteps(taskState: StoredTaskState, locale: Locale): AssistantPlanStep[] {
+  const planSteps = taskState.plan?.steps;
+  if (!planSteps?.length) {
+    return [{
+      id: "step-1",
+      title: formatAiTaskTool(taskState.aiTask),
+      description: locale === "zh" ? "执行当前 AI 任务并保存结果。" : "Run the current AI task and save the result.",
+      tool: formatAiTaskTool(taskState.aiTask),
+      deterministic: false,
+      status: conversationStatusToPlanStepStatus(taskState.status),
+    }];
+  }
+
+  if (taskState.status === "completed") {
+    return planSteps.map((step) => ({ ...step, status: "completed" }));
+  }
+
+  if (taskState.status === "failed") {
+    return markFailedPlanSteps(planSteps, taskState);
+  }
+
+  if (taskState.status === "idle") {
+    return planSteps.map((step) => ({ ...step, status: "pending" }));
+  }
+
+  return markActivePlanSteps(planSteps, taskState);
+}
+
+function markActivePlanSteps(planSteps: AssistantPlanStep[], taskState: StoredTaskState): AssistantPlanStep[] {
+  const deterministicTool = taskState.deterministicExecution?.tool;
+  const deterministicFailed = Boolean(taskState.deterministicExecution?.error);
+
+  let readyAssigned = false;
+  return planSteps.map((step) => {
+    if (step.deterministic && deterministicTool && step.tool === deterministicTool && !deterministicFailed) {
+      return { ...step, status: "completed" };
+    }
+
+    if (!readyAssigned) {
+      readyAssigned = true;
+      return { ...step, status: deterministicFailed && step.deterministic ? "failed" : "ready" };
+    }
+
+    return { ...step, status: "pending" };
+  });
+}
+
+function markFailedPlanSteps(planSteps: AssistantPlanStep[], taskState: StoredTaskState): AssistantPlanStep[] {
+  const deterministicTool = taskState.deterministicExecution?.tool;
+  const deterministicFailed = Boolean(taskState.deterministicExecution?.error);
+  let failureAssigned = false;
+
+  return planSteps.map((step) => {
+    if (deterministicFailed && deterministicTool && step.tool === deterministicTool) {
+      failureAssigned = true;
+      return { ...step, status: "failed" };
+    }
+
+    if (failureAssigned) {
+      return { ...step, status: "blocked" };
+    }
+
+    if (deterministicTool && step.deterministic && step.tool === deterministicTool) {
+      return { ...step, status: "completed" };
+    }
+
+    if (!failureAssigned && (!deterministicTool || !step.deterministic)) {
+      failureAssigned = true;
+      return { ...step, status: "failed" };
+    }
+
+    return { ...step, status: "blocked" };
+  });
+}
+
+function conversationStatusToPlanStepStatus(status: ConversationStatus): AssistantPlanStepStatus {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (isConversationActive(status)) return "ready";
+  return "pending";
+}
+
+function getPlanStepIcon(status: AssistantPlanStepStatus) {
+  if (status === "completed") return <CheckCircle2 size={16} />;
+  if (status === "failed") return <AlertCircle size={16} />;
+  if (status === "blocked") return <AlertCircle size={16} />;
+  if (status === "ready") return <LoaderCircle size={16} className="spin" />;
+  return <Circle size={16} />;
+}
+
+function formatAiTaskTool(task: AiTask) {
+  const labels: Record<AiTask, string> = {
+    prompt: "language-model",
+    summarize: "summarizer",
+    translate: "translator",
+    "detect-language": "language-detector",
+    write: "writer",
+    rewrite: "rewriter",
+  };
+
+  return labels[task];
+}
+
+function formatJsonForDisplay(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  return JSON.stringify(value, null, 2);
+}
+
+async function writeClipboardText(text: string) {
+  if (!navigator.clipboard?.writeText) {
+    throw new Error("Clipboard API is unavailable.");
+  }
+
+  await navigator.clipboard.writeText(text);
+}
+
 function formatTextActionUserMessage(task: TextAction, text: string, locale: Locale) {
   const copy = translations[locale];
   const separator = locale === "zh" ? "：" : ": ";
@@ -2871,25 +3571,424 @@ function detectTranslationDirection(text: string, locale: Locale): "zh-to-en" | 
   return "en-to-zh";
 }
 
-async function executeMemoryCommand(command: AssistantMemoryCommand, locale: Locale) {
-  const copy = translations[locale];
-
-  if (command.type === "remember") {
-    const memory = await saveAssistantMemory(command.content);
-    return locale === "zh"
-      ? `${copy.memorySaved}：${memory.content}`
-      : `${copy.memorySaved}: ${memory.content}`;
+async function executeMemoryOperation(
+  operation: Exclude<ContextMemoryOperation, { action: "none" }>,
+  locale: Locale,
+): Promise<MemoryOperationExecutionResult> {
+  if (operation.action === "remember") {
+    return executeRememberMemoryOperation(operation, locale);
   }
 
-  const deletedMemories = await deleteAssistantMemoriesByQuery(command.query);
-  if (!deletedMemories.length) {
-    return copy.memoryNotFound;
+  const deletedMemories = await deleteAssistantMemoriesByQueries(
+    operation.targets.length ? operation.targets : [operation.query],
+  );
+  return { action: "forget", deletedMemories, success: deletedMemories.length > 0 };
+}
+
+async function executeRememberMemoryOperation(
+  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  locale: Locale,
+): Promise<MemoryOperationExecutionResult> {
+  const memoryType = operation.memoryType ?? classifyMemoryType(operation.content);
+  const relatedMemories = await findRelatedMemoriesForRemember(operation);
+  const decision = relatedMemories.length
+    ? await planRememberWriteDecisionWithModel(operation, relatedMemories, memoryType, locale)
+    : { action: "save_new" as const, content: operation.content, memoryType };
+
+  if (decision.action === "replace_existing" || decision.action === "merge_with_existing") {
+    const targetMemory = relatedMemories.find((memory) => memory.id === decision.existingMemoryId) ?? relatedMemories[0];
+    if (targetMemory) {
+      const nextContent = decision.action === "merge_with_existing"
+        ? mergeMemoryContent(targetMemory.content, decision.content || operation.content)
+        : decision.content || operation.content;
+      const updatedMemory = await updateAssistantMemory(targetMemory.id, {
+        content: nextContent,
+        type: decision.memoryType ?? memoryType,
+      });
+      return {
+        action: "remember",
+        updatedMemory,
+        previousMemory: targetMemory,
+        decision: decision.action === "merge_with_existing" ? "merged" : "updated",
+        success: true,
+      };
+    }
   }
 
-  const deletedList = deletedMemories.map((memory) => `- ${memory.content}`).join("\n");
+  if (decision.action === "ask_user") {
+    return { action: "remember", decision: "needs_confirmation", success: false };
+  }
+
+  const savedMemory = await saveAssistantMemory(decision.content || operation.content, decision.memoryType ?? memoryType);
+  return {
+    action: "remember",
+    savedMemory,
+    decision: decision.action === "keep_both" ? "kept_both" : "saved",
+    success: true,
+  };
+}
+
+async function findRelatedMemoriesForRemember(operation: Extract<ContextMemoryOperation, { action: "remember" }>) {
+  const queries = operation.targets.length ? operation.targets : [operation.content];
+  const related = new Map<string, AssistantMemory>();
+
+  for (const query of queries) {
+    const memories = await searchAssistantMemories(query, 5);
+    for (const memory of memories) {
+      related.set(memory.id, memory);
+    }
+  }
+
+  return [...related.values()];
+}
+
+async function planRememberWriteDecisionWithModel(
+  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  relatedMemories: AssistantMemory[],
+  memoryType: AssistantMemoryType,
+  locale: Locale,
+): Promise<RememberWriteDecision> {
+  const fallback = createFallbackRememberWriteDecision(operation, relatedMemories, memoryType);
+  try {
+    const rawResult = await runAiTask({
+      task: "prompt",
+      text: buildRememberWriteDecisionPrompt(operation, relatedMemories, memoryType, locale),
+      locale,
+    });
+    return normalizeRememberWriteDecision(rawResult, relatedMemories, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function buildRememberWriteDecisionPrompt(
+  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  relatedMemories: AssistantMemory[],
+  memoryType: AssistantMemoryType,
+  locale: Locale,
+) {
   return locale === "zh"
-    ? `${copy.memoryDeleted} ${deletedMemories.length} 条：\n${deletedList}`
-    : `${copy.memoryDeleted}: ${deletedMemories.length}\n${deletedList}`;
+    ? `你是 localAI 的个人记忆写入决策器。请判断新记忆与已有记忆的关系，只输出一个 JSON 对象，不要输出 Markdown。
+
+核心规则：
+- 如果新记忆和某条已有记忆描述同一主体的同一属性，但值不同，应 replace_existing，用新事实覆盖旧事实。
+- 如果新记忆和已有记忆是同一主体的互补事实，应 merge_with_existing。
+- 如果是不同主体或不同主题，应 save_new。
+- 如果确实无法判断，才 ask_user。
+- 不要同时保留互相矛盾的事实。
+
+新记忆：
+${JSON.stringify({ content: operation.content, memoryType, targets: operation.targets }, null, 2)}
+
+候选旧记忆：
+${JSON.stringify(relatedMemories.map((memory) => ({ id: memory.id, type: memory.type, content: memory.content })), null, 2)}
+
+输出 schema：
+{"action":"save_new|replace_existing|merge_with_existing|keep_both|ask_user","existingMemoryId":"旧记忆 id，可选","content":"最终要保存的自然事实，可选","memoryType":"preference|fact|project|task","rationale":"简短原因"}`
+    : `You are localAI's personal memory write decision maker. Decide how the new memory relates to existing memories. Output exactly one JSON object and no Markdown.
+
+Rules:
+- If the new memory and an existing memory describe the same subject and same attribute with a different value, use replace_existing.
+- If they are complementary facts about the same subject, use merge_with_existing.
+- If they are different subjects or topics, use save_new.
+- Use ask_user only when genuinely ambiguous.
+- Do not keep mutually contradictory facts at the same time.
+
+New memory:
+${JSON.stringify({ content: operation.content, memoryType, targets: operation.targets }, null, 2)}
+
+Existing candidates:
+${JSON.stringify(relatedMemories.map((memory) => ({ id: memory.id, type: memory.type, content: memory.content })), null, 2)}
+
+Output schema:
+{"action":"save_new|replace_existing|merge_with_existing|keep_both|ask_user","existingMemoryId":"existing memory id, optional","content":"final natural fact to save, optional","memoryType":"preference|fact|project|task","rationale":"short reason"}`;
+}
+
+function normalizeRememberWriteDecision(
+  rawResult: string,
+  relatedMemories: AssistantMemory[],
+  fallback: RememberWriteDecision,
+): RememberWriteDecision {
+  const parsed = parseJsonObject(rawResult);
+  const allowedActions = new Set(["save_new", "replace_existing", "merge_with_existing", "keep_both", "ask_user"]);
+  if (!parsed || typeof parsed.action !== "string" || !allowedActions.has(parsed.action)) {
+    return fallback;
+  }
+
+  const relatedIds = new Set(relatedMemories.map((memory) => memory.id));
+  const existingMemoryId = typeof parsed.existingMemoryId === "string" && relatedIds.has(parsed.existingMemoryId)
+    ? parsed.existingMemoryId
+    : fallback.existingMemoryId;
+
+  if ((parsed.action === "replace_existing" || parsed.action === "merge_with_existing") && !existingMemoryId) {
+    return fallback;
+  }
+
+  return {
+    action: parsed.action as RememberWriteDecision["action"],
+    existingMemoryId,
+    content: typeof parsed.content === "string" && parsed.content.trim() ? parsed.content.trim() : fallback.content,
+    memoryType: isAssistantMemoryType(parsed.memoryType) ? parsed.memoryType : fallback.memoryType,
+    rationale: typeof parsed.rationale === "string" && parsed.rationale.trim() ? parsed.rationale.trim() : fallback.rationale,
+  };
+}
+
+function createFallbackRememberWriteDecision(
+  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  relatedMemories: AssistantMemory[],
+  memoryType: AssistantMemoryType,
+): RememberWriteDecision {
+  if (relatedMemories.length === 1 && operation.targets.length) {
+    return {
+      action: "replace_existing",
+      existingMemoryId: relatedMemories[0].id,
+      content: operation.content,
+      memoryType,
+      rationale: "Found one existing memory for the same target.",
+    };
+  }
+
+  return {
+    action: "ask_user",
+    content: operation.content,
+    memoryType,
+    rationale: "Multiple related memories require confirmation.",
+  };
+}
+
+async function createMemoryOperationReply(
+  operation: Exclude<ContextMemoryOperation, { action: "none" }>,
+  result: MemoryOperationExecutionResult | undefined,
+  locale: Locale,
+) {
+  const fallback = formatMemoryOperationFallbackReply(operation, result, locale);
+  try {
+    const reply = await runAiTask({
+      task: "prompt",
+      text: buildMemoryOperationReplyPrompt(operation, result, locale),
+      locale,
+    });
+    return reply.trim() || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function buildMemoryOperationReplyPrompt(
+  operation: Exclude<ContextMemoryOperation, { action: "none" }>,
+  result: MemoryOperationExecutionResult | undefined,
+  locale: Locale,
+) {
+  const payload = JSON.stringify(createMemoryOperationReplyPayload(operation, result), null, 2);
+
+  return locale === "zh"
+    ? `你是 localAI。下面是一条已经由程序执行完的个人记忆操作。请像正常对话一样给用户一个简洁自然的回复。
+
+要求：
+- 不要输出 JSON、不要输出“执行日志”、不要用项目符号列出内部数据。
+- 如果成功，直接说明已经处理好，并自然概括处理了什么；不要提“条数”，除非用户明确问数量。
+- 如果没有找到可删除内容，直接说明没有找到对应记忆，不要要求用户反复确认。
+- 不要编造没有执行的结果。
+- 删除操作不要复述被删除记忆的原文，只说已经删除相关信息。
+
+操作结果：
+${payload}`
+    : `You are localAI. The following personal memory operation has already been executed by code. Reply naturally and concisely as a normal assistant.
+
+Rules:
+- Do not output JSON, execution logs, or bullet-list internal data.
+- If successful, say it is done and naturally summarize what changed; do not mention counts unless the user explicitly asked for counts.
+- If no matching memory was found, say so directly and do not ask for repeated confirmation.
+- Do not invent results that were not executed.
+- For delete operations, do not repeat the deleted memory text; just say the related information was removed.
+
+Operation result:
+${payload}`;
+}
+
+function createMemoryOperationReplyPayload(
+  operation: Exclude<ContextMemoryOperation, { action: "none" }>,
+  result: MemoryOperationExecutionResult | undefined,
+) {
+  if (operation.action === "remember") {
+    return {
+      action: "remember",
+      success: result?.action === "remember" && result.success,
+      content: operation.content,
+      targets: operation.targets,
+    };
+  }
+
+  return {
+    action: "forget",
+    success: result?.action === "forget" && result.success,
+    query: operation.query,
+    targets: operation.targets,
+    deletedCount: result?.action === "forget" ? result.deletedMemories.length : 0,
+  };
+}
+
+function formatMemoryOperationFallbackReply(
+  operation: Exclude<ContextMemoryOperation, { action: "none" }>,
+  result: MemoryOperationExecutionResult | undefined,
+  locale: Locale,
+) {
+  if (operation.action === "remember") {
+    if (result?.action === "remember" && result.success) {
+      return locale === "zh" ? "已帮你记住。" : "I've saved that to memory.";
+    }
+    return locale === "zh"
+      ? "这条记忆和已有内容相似，我先放到个人记忆面板里等你确认。"
+      : "This looks similar to an existing memory, so I put it in the memory panel for you to confirm.";
+  }
+
+  if (result?.action === "forget" && result.success) {
+    const targetText = operation.targets.length ? operation.targets.join(locale === "zh" ? "和" : " and ") : operation.query;
+    return locale === "zh" ? `已经删掉${targetText}相关的信息。` : `I've removed the related information about ${targetText}.`;
+  }
+
+  return locale === "zh" ? "没有找到对应的个人记忆。" : "I couldn't find a matching personal memory.";
+}
+
+async function planMemoryOperationWithModel(
+  input: string,
+  locale: Locale,
+  fallbackOperation: ContextMemoryOperation,
+  onProgress?: (message: string) => void,
+): Promise<ContextMemoryOperation> {
+  if (fallbackOperation.action === "none") {
+    return fallbackOperation;
+  }
+
+  try {
+    onProgress?.(locale === "zh" ? "后台推理中" : "Running in background");
+    const rawResult = await runAiTask({
+      task: "prompt",
+      text: buildMemoryOperationPlanningPrompt(input, locale, fallbackOperation),
+      locale,
+    });
+    return normalizeModelMemoryOperation(rawResult, fallbackOperation);
+  } catch {
+    return fallbackOperation;
+  }
+}
+
+function buildMemoryOperationPlanningPrompt(
+  input: string,
+  locale: Locale,
+  fallbackOperation: Exclude<ContextMemoryOperation, { action: "none" }>,
+) {
+  const allowedAction = fallbackOperation.action;
+  const schema = allowedAction === "remember"
+    ? '{"action":"remember","content":"normalized memory fact from the user perspective","memoryType":"preference|fact|project|task","targets":["entity or topic"],"confidence":0.0,"rationale":"short reason"}'
+    : '{"action":"forget","query":"normalized deletion query","targets":["entity or topic"],"confidence":0.0,"rationale":"short reason"}';
+
+  return locale === "zh"
+    ? `你是 localAI 的记忆操作规划器。请先理解用户真实意图，再只输出一个 JSON 对象，不要输出 Markdown。
+
+要求：
+- 只允许 action 为 "${allowedAction}"，不要改变用户要执行的操作类型。
+- content/query 必须去掉“请、帮我、记住、删除、个人记忆、关于、信息吧”等操作性外壳，只保留要存储或删除的事实主体。
+- 如果用户一次提到多个并列对象，targets 必须拆成多个目标，例如“张三和李四”应为 ["张三","李四"]。
+- remember 的 content 要是经过理解后的自然事实，不要保存命令句本身；memoryType 只能是 preference、fact、project、task。
+- 不要编造用户没有说过的信息。
+
+JSON schema 示例：
+${schema}
+
+用户输入：
+${input}`
+    : `You are localAI's memory operation planner. Understand the user's intent first, then output exactly one JSON object and no Markdown.
+
+Rules:
+- The only allowed action is "${allowedAction}"; do not change the requested operation type.
+- content/query must remove command wrapper words and keep only the fact or deletion subject.
+- Split multiple coordinated targets, for example "Alice and Bob" becomes ["Alice","Bob"].
+- For remember, content must be the understood memory fact, not the command sentence; memoryType must be preference, fact, project, or task.
+- Do not invent information the user did not provide.
+
+JSON schema example:
+${schema}
+
+User input:
+${input}`;
+}
+
+function normalizeModelMemoryOperation(rawResult: string, fallbackOperation: ContextMemoryOperation): ContextMemoryOperation {
+  if (fallbackOperation.action === "none") {
+    return fallbackOperation;
+  }
+
+  const parsed = parseJsonObject(rawResult);
+  if (!parsed || parsed.action !== fallbackOperation.action) {
+    return fallbackOperation;
+  }
+
+  const confidence = normalizeConfidence(parsed.confidence, fallbackOperation.confidence);
+  const rationale = typeof parsed.rationale === "string" && parsed.rationale.trim()
+    ? parsed.rationale.trim()
+    : fallbackOperation.rationale;
+  const targets = normalizeStringArray(parsed.targets);
+
+  if (fallbackOperation.action === "remember") {
+    const content = typeof parsed.content === "string" && parsed.content.trim()
+      ? parsed.content.trim()
+      : fallbackOperation.content;
+    const memoryType = isAssistantMemoryType(parsed.memoryType) ? parsed.memoryType : fallbackOperation.memoryType;
+
+    return {
+      action: "remember",
+      content,
+      memoryType,
+      targets: targets.length ? targets : fallbackOperation.targets,
+      confidence,
+      rationale,
+    };
+  }
+
+  const query = typeof parsed.query === "string" && parsed.query.trim()
+    ? parsed.query.trim()
+    : fallbackOperation.query;
+
+  return {
+    action: "forget",
+    query,
+    targets: targets.length ? targets : fallbackOperation.targets,
+    confidence,
+    rationale,
+  };
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  const jsonText = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim()
+    ?? trimmed.match(/\{[\s\S]*\}/)?.[0]
+    ?? trimmed;
+
+  try {
+    const parsed = JSON.parse(jsonText) as unknown;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeStringArray(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return [...new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean))];
+}
+
+function normalizeConfidence(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1 ? value : fallback;
+}
+
+function isAssistantMemoryType(value: unknown): value is AssistantMemoryType {
+  return value === "preference" || value === "fact" || value === "project" || value === "task";
 }
 
 function formatMemoryType(type: "preference" | "fact" | "project" | "task", locale: Locale) {
@@ -2901,6 +4000,15 @@ function formatMemoryType(type: "preference" | "fact" | "project" | "task", loca
   };
 
   return labels[type][locale];
+}
+
+function mergeMemoryContent(existingContent: string, nextContent: string) {
+  const existing = existingContent.trim();
+  const next = nextContent.trim();
+  if (!existing) return next;
+  if (!next || existing.includes(next)) return existing;
+  if (next.includes(existing)) return next;
+  return `${existing}\n${next}`;
 }
 
 async function resolveAssistantMemories(input: string, locale: Locale) {
@@ -2978,6 +4086,17 @@ function formatMessageSourceLabel(source: MessageSource, fallbackIndex: number, 
   }
 
   return `${label} ${source.documentName} · ${translations[locale].sourceChunk} ${source.chunkIndex + 1}`;
+}
+
+function formatMessageSourcesHeading(sources: NonNullable<ChatMessage["sources"]>, locale: Locale) {
+  const hasKnowledge = sources.some((source) => source.sourceType === "knowledge");
+  const hasMemory = sources.some((source) => source.sourceType === "memory");
+
+  if (hasMemory && !hasKnowledge) {
+    return translations[locale].memoryHitExplanation;
+  }
+
+  return translations[locale].references;
 }
 
 function stripGeneratedSourceSection(text: string) {

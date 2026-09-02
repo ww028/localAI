@@ -1,4 +1,4 @@
-import type { AssistantMemory } from "./assistantMemoryStore";
+import type { AssistantMemory, AssistantMemoryType } from "./assistantMemoryStore";
 import type { Locale } from "./chromeAi";
 import type { AssistantIntent } from "./assistantIntent";
 import type { KnowledgeMatch } from "./knowledgeStore";
@@ -7,10 +7,30 @@ export type ContextSubject = "user_profile_query" | "entity_profile_query" | "us
 export type ContextMemoryMode = "none" | "implicit" | "answer_source";
 export type ContextKnowledgeMode = "none" | "cite";
 export type ContextVisibleSource = "memory" | "knowledge";
+export type ContextMemoryOperation =
+  | {
+      action: "none";
+    }
+  | {
+      action: "remember";
+      content: string;
+      memoryType?: AssistantMemoryType;
+      targets: string[];
+      confidence: number;
+      rationale: string;
+    }
+  | {
+      action: "forget";
+      query: string;
+      targets: string[];
+      confidence: number;
+      rationale: string;
+    };
 
 export type ContextPlan = {
   subject: ContextSubject;
   targetEntity?: string;
+  memoryOperation: ContextMemoryOperation;
   memoryMode: ContextMemoryMode;
   knowledgeMode: ContextKnowledgeMode;
   requiresLocalEvidence: boolean;
@@ -27,6 +47,7 @@ type CreateContextPlanInput = {
   sources: KnowledgeMatch[];
   memories: AssistantMemory[];
   sourceMemories?: AssistantMemory[];
+  memoryOperation?: ContextMemoryOperation;
 };
 
 export function createContextPlan({
@@ -36,9 +57,11 @@ export function createContextPlan({
   sources,
   memories,
   sourceMemories,
+  memoryOperation: plannedMemoryOperation,
 }: CreateContextPlanInput): ContextPlan {
   const normalizedQuestion = normalizeQuestion(question);
   const entityName = extractEntityProfileTarget(normalizedQuestion, locale);
+  const memoryOperation = plannedMemoryOperation ?? createMemoryOperationPlan(question, locale, intent);
   const subject = detectSubject(normalizedQuestion, locale, entityName);
   const hasKnowledge = sources.length > 0;
   const hasBuiltinKnowledge = sources.some((source) => source.spaceId === "builtin");
@@ -56,6 +79,7 @@ export function createContextPlan({
   return {
     subject,
     targetEntity: entityName,
+    memoryOperation,
     memoryMode,
     knowledgeMode,
     requiresLocalEvidence,
@@ -70,6 +94,55 @@ export function createContextPlan({
     ),
     rationale: buildRationale(subject, memoryMode, knowledgeMode, shouldCompareWithGeneralKnowledge, locale),
   };
+}
+
+export function createMemoryOperationPlan(question: string, locale: Locale, intent: AssistantIntent): ContextMemoryOperation {
+  if (intent.type !== "memory_operation") {
+    return { action: "none" };
+  }
+
+  const text = question.trim();
+  const rememberContent = matchFirst(text, [
+    /^(?:请)?(?:帮我)?记住[:：\s]*(.+)$/i,
+    /^(?:你要记住|记一下)[:：\s]*(.+)$/i,
+    /^remember(?: that)?[:\s]+(.+)$/i,
+    /^please remember(?: that)?[:\s]+(.+)$/i,
+  ]);
+
+  if (rememberContent) {
+    return {
+      action: "remember",
+      content: rememberContent,
+      targets: extractMemoryTargets(rememberContent, locale),
+      confidence: 0.92,
+      rationale: locale === "zh"
+        ? "用户明确要求保存个人记忆。"
+        : "The user explicitly requested saving personal memory.",
+    };
+  }
+
+  const forgetQuery = matchFirst(text, [
+    /^(?:请)?(?:忘记|忘掉|忘了|删除记忆|删掉记忆|不要记住|别记了)[:：\s]*(.+)$/i,
+    /^(?:请)?(?:删除|删掉|移除|清除)(?:个人记忆(?:里|中)?|记忆里|记忆中)?(?:关于|有关)?(.+?)(?:相关)?(?:的信息|的内容|的记忆|这条记忆|记忆)?(?:吧)?$/i,
+    /^(?:请)?把(.+?)(?:忘记|忘掉|删掉|删除)(?:吧)?$/i,
+    /^forget(?: that)?[:\s]+(.+)$/i,
+    /^delete memory[:\s]+(.+)$/i,
+  ]);
+  const normalizedForgetQuery = forgetQuery ? normalizeMemoryOperationQuery(forgetQuery) : "";
+
+  if (normalizedForgetQuery) {
+    return {
+      action: "forget",
+      query: normalizedForgetQuery,
+      targets: extractMemoryTargets(normalizedForgetQuery, locale),
+      confidence: 0.9,
+      rationale: locale === "zh"
+        ? "用户明确要求删除个人记忆；删除执行只会按结构化目标命中本地记忆。"
+        : "The user explicitly requested deleting personal memory; execution will only delete local memories matched by structured targets.",
+    };
+  }
+
+  return { action: "none" };
 }
 
 export function shouldExpandMemorySearch(question: string, locale: Locale) {
@@ -272,8 +345,8 @@ function buildResponseConstraints(
     );
     constraints.push(
       locale === "zh"
-        ? "不要机械复述个人记忆原句；用像在和用户对话的口吻回答。"
-        : "Do not mechanically repeat the saved memory text; answer conversationally in the user's perspective.",
+        ? "不要机械复述个人记忆原句，也不要做简单词语替换；必须先理解记忆表达的事实、对象和关系，再用像在和用户对话的口吻自然回答。"
+        : "Do not mechanically repeat saved memory text or do simple word substitution. First understand the facts, entities, and relationships, then answer naturally in the user's perspective.",
     );
     constraints.push(
       locale === "zh"
@@ -320,6 +393,43 @@ function buildRationale(
   return locale === "zh"
     ? `上下文策略基于用户问题主体和可用上下文确定：${JSON.stringify(payload)}`
     : `Context policy was selected from the question subject and available context: ${JSON.stringify(payload)}`;
+}
+
+function matchFirst(text: string, patterns: RegExp[]) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const content = match?.[1]?.trim();
+    if (content) {
+      return content;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeMemoryOperationQuery(query: string) {
+  return query
+    .trim()
+    .replace(/^(?:个人记忆(?:里|中)?|记忆里|记忆中|我说过的|你记住的)\s*/i, "")
+    .replace(/^(?:关于|有关)\s*/i, "")
+    .replace(/[。.!！?？\s]+$/g, "")
+    .replace(/(?:相关)?(?:的信息|的内容|的记忆|这条记忆|这件事|这个信息|这条记忆|这件事情)$/i, "")
+    .replace(/(?:这件事|这个信息|这条记忆|这件事情)?(?:吧|哈|呀|啊|哦|了)$/i, "")
+    .trim();
+}
+
+function extractMemoryTargets(text: string, locale: Locale) {
+  const normalizedText = normalizeMemoryOperationQuery(text);
+  if (!normalizedText) {
+    return [];
+  }
+
+  const parts = normalizedText
+    .split(locale === "zh" ? /(?:以及|和|与|及|跟|同|,|，|、|\/|&)/ : /\b(?:and|or)\b|,|\/|&/i)
+    .map((part) => normalizeMemoryOperationQuery(part))
+    .filter((part) => part.length >= 2);
+
+  return [...new Set(parts.length ? parts : [normalizedText])];
 }
 
 function normalizeQuestion(question: string) {

@@ -22,6 +22,7 @@ const modulePromise = loadAssistantPromptModule();
 function createContextPlanFixture(overrides = {}) {
   return {
     subject: "external",
+    memoryOperation: { action: "none" },
     memoryMode: "answer_source",
     knowledgeMode: "cite",
     requiresLocalEvidence: false,
@@ -121,8 +122,9 @@ test("buildAssistantPrompt creates a partitioned Chinese assistant prompt", asyn
   assert.match(prompt, /"memoryMode": "answer_source"/);
   assert.match(prompt, /个人记忆/);
   assert.match(prompt, /本地知识库片段/);
-  assert.match(prompt, /用户原话记忆: 用户偏好简洁直接的回答/);
-  assert.match(prompt, /回答时必须改写成面向用户的自然二人称/);
+  assert.match(prompt, /本地个人事实: 用户偏好简洁直接的回答/);
+  assert.match(prompt, /回答前先理解事实、对象和关系/);
+  assert.match(prompt, /不要照抄原句/);
   assert.match(prompt, /\[1\] roadmap\.md #1/);
   assert.match(prompt, /用户问题：\n这个项目下一步做什么？/);
 });

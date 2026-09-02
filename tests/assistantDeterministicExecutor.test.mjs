@@ -57,11 +57,67 @@ test("executeDeterministicTask calculates arithmetic and aggregate expressions",
   assert.equal(arithmetic.handled, true);
   assert.equal(arithmetic.resultData.result, 21);
 
+  const percentExpression = executeDeterministicTask("计算 200 * 10%", intent("calculate"), basePlan, "zh");
+  assert.equal(percentExpression.resultData.result, 20);
+
   const sum = executeDeterministicTask("合计 1, 2, 3", intent("calculate"), basePlan, "zh");
   assert.equal(sum.resultData.result, 6);
 
+  const min = executeDeterministicTask("求最小值 4, -2, 8.5", intent("calculate"), basePlan, "zh");
+  assert.equal(min.resultData.result, -2);
+
+  const max = executeDeterministicTask("max 4, -2, 8.5", intent("calculate"), basePlan, "en");
+  assert.equal(max.resultData.result, 8.5);
+
   const percentage = executeDeterministicTask("20 占 50 的百分比", intent("calculate"), basePlan, "zh");
   assert.equal(percentage.resultData.result, 40);
+});
+
+test("executeDeterministicTask returns calculation failures for invalid input", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const execution = executeDeterministicTask("计算一下", intent("calculate"), basePlan, "zh");
+
+  assert.equal(execution.handled, true);
+  assert.equal(execution.tool, "calculator");
+  assert.match(execution.error, /没有找到/);
+});
+
+test("executeDeterministicTask calculates dates, workdays, and timezone conversions", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const plan = {
+    ...basePlan,
+    intentType: "date_time",
+    requiredTools: ["date-calculator"],
+    steps: [{ ...basePlan.steps[0], tool: "date-calculator" }],
+  };
+
+  const diff = executeDeterministicTask("2026-09-02 到 2026-09-12 日期差", intent("date_time"), plan, "zh");
+  assert.equal(diff.tool, "date-calculator");
+  assert.equal(diff.resultData.days, 10);
+
+  const offset = executeDeterministicTask("2026-09-02 10天后", intent("date_time"), plan, "zh");
+  assert.equal(offset.resultData.resultDate, "2026-09-12");
+
+  const workdays = executeDeterministicTask("2026-09-07 到 2026-09-13 工作日", intent("date_time"), plan, "zh");
+  assert.equal(workdays.resultData.businessDays, 5);
+
+  const timezone = executeDeterministicTask("09:30 UTC 转北京时间", intent("date_time"), plan, "zh");
+  assert.equal(timezone.resultData.resultTime, "17:30");
+});
+
+test("executeDeterministicTask returns date-time failures for missing dates", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const plan = {
+    ...basePlan,
+    intentType: "date_time",
+    requiredTools: ["date-calculator"],
+    steps: [{ ...basePlan.steps[0], tool: "date-calculator" }],
+  };
+  const execution = executeDeterministicTask("算一下日期", intent("date_time"), plan, "zh");
+
+  assert.equal(execution.handled, true);
+  assert.equal(execution.tool, "date-calculator");
+  assert.match(execution.error, /没有找到/);
 });
 
 test("executeDeterministicTask sorts numeric items deterministically", async () => {
@@ -77,6 +133,42 @@ test("executeDeterministicTask sorts numeric items deterministically", async () 
   assert.equal(execution.handled, true);
   assert.equal(execution.tool, "sorter");
   assert.deepEqual(execution.resultData.sortedItems, ["1", "3", "20"]);
+});
+
+test("executeDeterministicTask sorts text and records by field", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const plan = {
+    ...basePlan,
+    intentType: "sort",
+    requiredTools: ["sorter"],
+    steps: [{ ...basePlan.steps[0], tool: "sorter" }],
+  };
+
+  const text = executeDeterministicTask("排序：张三, 李四, Alice2, Alice10", intent("sort"), plan, "zh");
+  assert.deepEqual(text.resultData.sortedItems, ["Alice2", "Alice10", "李四", "张三"]);
+
+  const records = executeDeterministicTask(
+    "按 age 升序排序：name=Bob, age=20; name=Alice, age=18",
+    intent("sort"),
+    plan,
+    "zh",
+  );
+  assert.deepEqual(records.resultData.sortedRecords.map((record) => record.name), ["Alice", "Bob"]);
+});
+
+test("executeDeterministicTask returns sorting failures for underspecified lists", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const plan = {
+    ...basePlan,
+    intentType: "sort",
+    requiredTools: ["sorter"],
+    steps: [{ ...basePlan.steps[0], tool: "sorter" }],
+  };
+  const execution = executeDeterministicTask("排序：只有一个", intent("sort"), plan, "zh");
+
+  assert.equal(execution.handled, true);
+  assert.equal(execution.tool, "sorter");
+  assert.match(execution.error, /至少两个/);
 });
 
 test("executeDeterministicTask converts simple records to JSON and markdown table", async () => {
@@ -105,6 +197,74 @@ test("executeDeterministicTask converts simple records to JSON and markdown tabl
   );
   assert.match(table.resultText, /\| name \| age \|/);
   assert.match(table.resultText, /\| Bob \| 20 \|/);
+
+  const csv = executeDeterministicTask(
+    "转成 CSV：| name | age |\n| --- | --- |\n| Alice | 18 |",
+    intent("format_convert", { targetFormat: "csv" }),
+    plan,
+    "zh",
+  );
+  assert.match(csv.resultText, /name,age\nAlice,18/);
+
+  const list = executeDeterministicTask(
+    "转成列表：name,age\nAlice,18\nBob,20",
+    intent("format_convert", { targetFormat: "列表" }),
+    plan,
+    "zh",
+  );
+  assert.match(list.resultText, /- name: Alice, age: 18/);
+});
+
+test("executeDeterministicTask returns format conversion failures for empty input", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const plan = {
+    ...basePlan,
+    intentType: "format_convert",
+    requiredTools: ["formatter"],
+    steps: [{ ...basePlan.steps[0], tool: "formatter" }],
+  };
+  const execution = executeDeterministicTask("转成 JSON：", intent("format_convert", { targetFormat: "json" }), plan, "zh");
+
+  assert.equal(execution.handled, true);
+  assert.equal(execution.tool, "formatter");
+  assert.match(execution.error, /没有找到/);
+});
+
+test("executeDeterministicTask calculates text statistics", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const plan = {
+    ...basePlan,
+    intentType: "text_stats",
+    requiredTools: ["text-statistics"],
+    steps: [{ ...basePlan.steps[0], tool: "text-statistics" }],
+  };
+
+  const execution = executeDeterministicTask(
+    "文本统计：apple apple banana\n研发 张三\n研发 李四\n设计 王五",
+    intent("text_stats"),
+    plan,
+    "zh",
+  );
+
+  assert.equal(execution.tool, "text-statistics");
+  assert.equal(execution.resultData.topFrequencies[0].value, "apple");
+  assert.deepEqual(execution.resultData.duplicateItems.find((item) => item.value === "apple"), { value: "apple", count: 2 });
+  assert.equal(execution.resultData.groupCounts["研发"], 2);
+});
+
+test("executeDeterministicTask returns text statistics failures for empty input", async () => {
+  const { executeDeterministicTask } = await modulePromise;
+  const plan = {
+    ...basePlan,
+    intentType: "text_stats",
+    requiredTools: ["text-statistics"],
+    steps: [{ ...basePlan.steps[0], tool: "text-statistics" }],
+  };
+  const execution = executeDeterministicTask("统计字数：", intent("text_stats"), plan, "zh");
+
+  assert.equal(execution.handled, true);
+  assert.equal(execution.tool, "text-statistics");
+  assert.match(execution.error, /没有找到/);
 });
 
 test("formatDeterministicExecution returns a prompt-ready execution block", async () => {
@@ -116,4 +276,3 @@ test("formatDeterministicExecution returns a prompt-ready execution block", asyn
   assert.match(formatted, /"tool": "calculator"/);
   assert.match(formatted, /结果：3/);
 });
-

@@ -40,6 +40,20 @@ test("detectAssistantIntent identifies sort and format conversion tasks", async 
   assert.equal(formatIntent.entities.targetFormat, "json");
 });
 
+test("detectAssistantIntent identifies date-time and text statistics tasks", async () => {
+  const { detectAssistantIntent } = await modulePromise;
+
+  const dateIntent = detectAssistantIntent("2026-09-02 到 2026-09-12 日期差", "zh");
+  assert.equal(dateIntent.type, "date_time");
+  assert.equal(dateIntent.executionMode, "deterministic");
+  assert.deepEqual(dateIntent.requiredTools, ["date-calculator"]);
+
+  const textStatsIntent = detectAssistantIntent("统计这段文本的词频和重复项", "zh");
+  assert.equal(textStatsIntent.type, "text_stats");
+  assert.equal(textStatsIntent.executionMode, "deterministic");
+  assert.deepEqual(textStatsIntent.requiredTools, ["text-statistics"]);
+});
+
 test("detectAssistantIntent identifies knowledge and planning tasks", async () => {
   const { detectAssistantIntent } = await modulePromise;
 
@@ -52,6 +66,18 @@ test("detectAssistantIntent identifies knowledge and planning tasks", async () =
   assert.equal(planIntent.executionMode, "hybrid");
 });
 
+test("detectAssistantIntent identifies memory operations", async () => {
+  const { detectAssistantIntent } = await modulePromise;
+  const intent = detectAssistantIntent("删除个人记忆里关于张三和李四的信息吧", "zh");
+  const implicitMemoryIntent = detectAssistantIntent("删除张三和李四的信息", "zh");
+
+  assert.equal(intent.type, "memory_operation");
+  assert.equal(intent.executionMode, "deterministic");
+  assert.deepEqual(intent.requiredTools, ["memory-planner", "memory-store"]);
+  assert.equal(implicitMemoryIntent.type, "memory_operation");
+  assert.equal(implicitMemoryIntent.executionMode, "deterministic");
+});
+
 test("detectAssistantIntent falls back to chat for ordinary conversation", async () => {
   const { detectAssistantIntent } = await modulePromise;
   const intent = detectAssistantIntent("你好，今天聊点什么？", "zh");
@@ -60,4 +86,3 @@ test("detectAssistantIntent falls back to chat for ordinary conversation", async
   assert.equal(intent.executionMode, "answer");
   assert.deepEqual(intent.requiredTools, ["language-model"]);
 });
-

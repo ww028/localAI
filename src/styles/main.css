@@ -581,6 +581,10 @@ h1 {
   background: #ffffff;
 }
 
+.chat-panel.has-task-state {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
 .progress-track {
   position: absolute;
   top: 0;
@@ -613,16 +617,14 @@ h1 {
   line-height: 1.45;
 }
 
-.task-state-banner {
-  position: absolute;
-  top: 16px;
-  left: 24px;
-  right: 24px;
+.task-card {
+  position: relative;
   z-index: 3;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 10px 16px 0;
   border: 1px solid #dfe8ff;
   border-radius: 12px;
   background: #f5f8ff;
@@ -631,24 +633,48 @@ h1 {
   box-shadow: 0 12px 32px rgba(38, 65, 140, 0.08);
 }
 
-.task-state-banner.failed {
+.task-card.expanded {
+  display: grid;
+  align-items: stretch;
+  justify-content: stretch;
+  margin: 12px 16px 0;
+}
+
+.task-card.failed {
   border-color: #ffd9d5;
   background: #fff4f2;
   color: #9d2721;
 }
 
-.task-state-banner div {
+.task-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.task-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.task-card-title > div {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.task-state-banner strong {
+.task-card-title strong {
   font-size: 0.82rem;
   line-height: 1.3;
 }
 
-.task-state-banner span {
+.task-card-title span,
+.task-card-input {
   overflow: hidden;
   color: inherit;
   opacity: 0.72;
@@ -658,7 +684,70 @@ h1 {
   line-height: 1.3;
 }
 
-.task-state-banner button {
+.task-status-pill {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #dfe8ff;
+  color: #22346d;
+  padding: 5px 9px;
+  font-size: 0.72rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.task-status-pill.failed {
+  background: #ffd9d5;
+  color: #9d2721;
+}
+
+.task-status-pill.completed {
+  background: #dff5e7;
+  color: #14633d;
+}
+
+.task-card-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.task-card-summary > div {
+  min-width: 0;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.62);
+  padding: 8px 9px;
+}
+
+.task-card-summary span {
+  display: block;
+  color: inherit;
+  opacity: 0.62;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.task-card-summary strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.task-card-input {
+  margin: -2px 0 0;
+}
+
+.task-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  gap: 7px;
+}
+
+.task-card-actions button,
+.deterministic-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -672,6 +761,194 @@ h1 {
   font-size: 0.78rem;
   font-weight: 850;
   white-space: nowrap;
+}
+
+.task-action-secondary,
+.deterministic-toggle {
+  border: 1px solid rgba(17, 17, 17, 0.1);
+  background: rgba(255, 255, 255, 0.78);
+  color: inherit;
+}
+
+.task-action-primary {
+  border: 0;
+  background: #111111;
+  color: #ffffff;
+}
+
+.task-card-details {
+  display: grid;
+  gap: 10px;
+  max-height: min(52vh, 420px);
+  overflow-y: auto;
+  border-top: 1px solid rgba(34, 52, 109, 0.13);
+  padding-top: 10px;
+}
+
+.task-detail-section {
+  display: grid;
+  gap: 8px;
+}
+
+.task-detail-section h3 {
+  margin: 0;
+  color: inherit;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.task-plan-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-plan-step {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.64);
+  padding: 8px 9px;
+}
+
+.task-plan-step svg {
+  color: #7a84a2;
+}
+
+.task-plan-step.completed svg {
+  color: #15803d;
+}
+
+.task-plan-step.failed svg,
+.task-plan-step.blocked svg {
+  color: #b42318;
+}
+
+.task-plan-step > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.task-plan-step strong,
+.task-plan-step span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-plan-step strong {
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.task-plan-step span {
+  opacity: 0.72;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.task-plan-step em {
+  border-radius: 999px;
+  background: rgba(17, 17, 17, 0.06);
+  padding: 4px 7px;
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.deterministic-section {
+  gap: 6px;
+}
+
+.deterministic-toggle {
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.deterministic-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.deterministic-detail-grid > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.deterministic-detail-grid span {
+  color: inherit;
+  opacity: 0.68;
+  font-size: 0.7rem;
+  font-weight: 850;
+}
+
+.deterministic-detail-grid pre,
+.task-error-detail {
+  max-height: 130px;
+  overflow: auto;
+  margin: 0;
+  border-radius: 9px;
+  background: rgba(17, 17, 17, 0.06);
+  color: #1c2433;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.task-detail-empty {
+  color: inherit;
+  opacity: 0.7;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.sidepanel-surface .task-card {
+  margin: 8px 12px 0;
+}
+
+.sidepanel-surface .task-card-summary,
+.sidepanel-surface .deterministic-detail-grid {
+  grid-template-columns: 1fr;
+}
+
+.sidepanel-surface .task-card-header,
+.sidepanel-surface .task-plan-step {
+  align-items: start;
+}
+
+.sidepanel-surface .task-status-pill,
+.sidepanel-surface .task-plan-step em {
+  white-space: normal;
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .task-card {
+    align-items: stretch;
+    margin: 8px 12px 0;
+  }
+
+  .task-card,
+  .task-card-header {
+    flex-wrap: wrap;
+  }
+
+  .task-card-summary,
+  .deterministic-detail-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .sidepanel-width-guide {
@@ -727,7 +1004,7 @@ h1 {
 }
 
 .chat-panel.has-task-state .message-list {
-  padding-top: 82px;
+  padding-top: 14px;
 }
 
 .message-list::-webkit-scrollbar {
@@ -1431,7 +1708,7 @@ textarea::placeholder {
   display: grid;
   gap: 8px;
   width: min(420px, calc(var(--popup-width) - 64px));
-  max-height: 360px;
+  max-height: 420px;
   overflow: hidden;
   border: 1px solid #e5e5e5;
   border-radius: 14px;
@@ -1631,6 +1908,199 @@ textarea::placeholder {
   font-weight: 850;
 }
 
+.memory-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.memory-filter {
+  display: grid;
+  gap: 8px;
+  border-radius: 10px;
+  background: #f8f9fc;
+  padding: 8px;
+}
+
+.memory-search-field {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid #e4e7f2;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #6b7280;
+  padding: 0 10px;
+}
+
+.memory-search-field input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #171717;
+  font-size: 0.8rem;
+  font-weight: 760;
+}
+
+.memory-search-field input::placeholder {
+  color: #9ca3af;
+}
+
+.memory-type-segments {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  border-radius: 9px;
+  background: #eef2ff;
+  padding: 4px;
+  scrollbar-width: none;
+}
+
+.memory-type-segments::-webkit-scrollbar {
+  display: none;
+}
+
+.memory-type-segments button {
+  flex: 0 0 auto;
+  min-height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #58617a;
+  padding: 0 9px;
+  font-size: 0.72rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.memory-type-segments button.active {
+  background: #ffffff;
+  color: #293c88;
+  box-shadow: 0 1px 4px rgba(41, 60, 136, 0.12);
+}
+
+.memory-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #667085;
+  font-size: 0.72rem;
+  font-weight: 780;
+  line-height: 1.35;
+}
+
+.memory-toggle input {
+  appearance: none;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #d5dae7;
+  transition: background 140ms ease;
+}
+
+.memory-toggle input::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
+  content: "";
+  transition: transform 140ms ease;
+}
+
+.memory-toggle input:checked {
+  background: #293c88;
+}
+
+.memory-toggle input:checked::after {
+  transform: translateX(12px);
+}
+
+.memory-review {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #dfe4ff;
+  border-radius: 12px;
+  background: #f7f8ff;
+  color: #263674;
+  padding: 9px;
+}
+
+.memory-review-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.memory-review-header strong {
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.memory-review-header button {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+}
+
+.memory-review p,
+.memory-review blockquote {
+  margin: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 7px 8px;
+  color: #202020;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.memory-review blockquote {
+  border-left: 3px solid #b9c8f5;
+  color: #626a7b;
+}
+
+.memory-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.memory-review-actions button {
+  min-height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: #293c88;
+  color: #ffffff;
+  padding: 0 9px;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.memory-review-actions button:last-child {
+  border: 1px solid #dfe4ff;
+  background: #ffffff;
+  color: #4b5684;
+}
+
 .knowledge-header-action,
 .knowledge-delete-button {
   display: inline-grid;
@@ -1682,7 +2152,7 @@ textarea::placeholder {
 .memory-list {
   display: grid;
   gap: 6px;
-  max-height: 282px;
+  max-height: 210px;
   overflow-y: auto;
   padding-right: 2px;
   scrollbar-width: thin;

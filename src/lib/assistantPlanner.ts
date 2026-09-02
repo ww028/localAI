@@ -1,7 +1,7 @@
 import type { Locale } from "./chromeAi";
 import type { AssistantIntent } from "./assistantIntent";
 
-export type AssistantPlanStepStatus = "pending" | "ready" | "blocked";
+export type AssistantPlanStepStatus = "pending" | "ready" | "blocked" | "completed" | "failed";
 
 export type AssistantPlanStep = {
   id: string;
@@ -197,6 +197,33 @@ const planTemplates: Record<AssistantIntent["type"], PlanTemplate> = {
     ],
     needsModelPolish: true,
   },
+  memory_operation: {
+    summary: {
+      zh: "先把用户请求解析为结构化记忆操作计划，再由本地记忆存储确定性执行。",
+      en: "Parse the user request into a structured memory operation plan, then execute it deterministically in local memory storage.",
+    },
+    steps: [
+      {
+        title: { zh: "解析记忆操作", en: "Parse memory operation" },
+        description: {
+          zh: "识别记忆操作类型、作用范围和一个或多个目标对象。",
+          en: "Identify the memory operation type, scope, and one or more target objects.",
+        },
+        tool: "memory-planner",
+        deterministic: true,
+      },
+      {
+        title: { zh: "执行本地记忆变更", en: "Execute local memory change" },
+        description: {
+          zh: "只根据结构化计划访问本地 IndexedDB，新增或删除明确命中的个人记忆。",
+          en: "Access local IndexedDB only through the structured plan, creating or deleting explicitly matched personal memories.",
+        },
+        tool: "memory-store",
+        deterministic: true,
+      },
+    ],
+    needsModelPolish: false,
+  },
   calculate: {
     summary: {
       zh: "提取数值表达式，后续由确定性计算器执行，再解释结果。",
@@ -229,6 +256,33 @@ const planTemplates: Record<AssistantIntent["type"], PlanTemplate> = {
         },
         tool: "language-model",
         deterministic: false,
+      },
+    ],
+    needsModelPolish: true,
+  },
+  date_time: {
+    summary: {
+      zh: "解析日期、时间区间或时区要求，并使用确定性日期时间工具计算。",
+      en: "Parse date, time range, or time-zone requests and calculate them with a deterministic date-time tool.",
+    },
+    steps: [
+      {
+        title: { zh: "解析日期时间", en: "Parse date and time" },
+        description: {
+          zh: "识别日期、天数、工作日范围、时间和目标时区。",
+          en: "Identify dates, day offsets, business-day ranges, times, and target time zones.",
+        },
+        tool: "date-calculator",
+        deterministic: true,
+      },
+      {
+        title: { zh: "执行日期时间计算", en: "Run date-time calculation" },
+        description: {
+          zh: "用确定性规则计算日期差、几天后、工作日数量或时区转换。",
+          en: "Use deterministic rules to calculate date differences, offsets, workdays, or time-zone conversion.",
+        },
+        tool: "date-calculator",
+        deterministic: true,
       },
     ],
     needsModelPolish: true,
@@ -282,6 +336,33 @@ const planTemplates: Record<AssistantIntent["type"], PlanTemplate> = {
           en: "Output structured content in the target format.",
         },
         tool: "formatter",
+        deterministic: true,
+      },
+    ],
+    needsModelPolish: true,
+  },
+  text_stats: {
+    summary: {
+      zh: "解析文本统计目标，并使用确定性文本统计工具输出计数结果。",
+      en: "Parse text-statistics goals and output counts with a deterministic text statistics tool.",
+    },
+    steps: [
+      {
+        title: { zh: "解析统计目标", en: "Parse statistics goal" },
+        description: {
+          zh: "识别字数、词频、重复项、去重或分组计数等统计目标。",
+          en: "Identify character counts, word frequency, duplicates, dedupe, or group counts.",
+        },
+        tool: "text-statistics",
+        deterministic: true,
+      },
+      {
+        title: { zh: "执行文本统计", en: "Run text statistics" },
+        description: {
+          zh: "按确定性规则输出统计结果和结构化数据。",
+          en: "Output statistics and structured data using deterministic rules.",
+        },
+        tool: "text-statistics",
         deterministic: true,
       },
     ],
@@ -367,4 +448,3 @@ function createPlanId(intentType: AssistantIntent["type"], input: string) {
 
   return `${intentType}-${hash.toString(36)}`;
 }
-

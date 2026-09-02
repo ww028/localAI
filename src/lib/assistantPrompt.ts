@@ -98,6 +98,7 @@ function buildContextPlanContext(contextPlan: ContextPlan, locale: Locale) {
   const serialized = JSON.stringify({
     subject: contextPlan.subject,
     targetEntity: contextPlan.targetEntity,
+    memoryOperation: contextPlan.memoryOperation,
     memoryMode: contextPlan.memoryMode,
     knowledgeMode: contextPlan.knowledgeMode,
     requiresLocalEvidence: contextPlan.requiresLocalEvidence,
@@ -174,12 +175,26 @@ function buildMemoryContext(memories: AssistantMemory[], contextPlan: ContextPla
   }
 
   const memoryText = memories
-    .map((memory) => `- ${locale === "zh" ? "用户原话记忆" : "user-authored memory"}: ${memory.content}`)
+    .map((memory) => `- ${locale === "zh" ? "本地个人事实" : "local personal fact"}: ${memory.content}`)
     .join("\n");
 
   return locale === "zh"
-    ? `用户保存的长期记忆（内容中的第一人称均指用户，回答时必须改写成面向用户的自然二人称，不要照抄原句）：\n${memoryText}`
-    : `User-saved long-term memories (first-person wording refers to the user):\n${memoryText}`;
+    ? `用户保存的长期记忆：
+${memoryText}
+
+使用要求：
+- 这些内容是用户保存的本地事实源，不是搜索结果。
+- 回答前先理解事实、对象和关系，再用自然语言回答用户当前问题。
+- 内容中的第一人称均指用户；输出时要改写成自然二人称或省略主语，不要逐字替换，也不要照抄原句。
+- 如果多条记忆共同回答问题，先综合归纳再输出，不要机械罗列。`
+    : `User-saved long-term memories:
+${memoryText}
+
+Usage rules:
+- These are user-saved local facts, not search results.
+- Understand the facts, entities, and relationships before answering the current question.
+- First-person wording refers to the user; rewrite it into natural second-person wording or omit the subject. Do not copy the memory verbatim.
+- If multiple memories answer the question together, synthesize them first instead of listing them mechanically.`;
 }
 
 function buildConversationContext(messages: StoredChatMessage[], locale: Locale) {

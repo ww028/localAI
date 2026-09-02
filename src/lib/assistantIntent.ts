@@ -8,9 +8,12 @@ export type AssistantIntentType =
   | "write"
   | "rewrite"
   | "plan"
+  | "memory_operation"
   | "calculate"
+  | "date_time"
   | "sort"
   | "format_convert"
+  | "text_stats"
   | "extract_todos";
 
 export type AssistantIntentExecutionMode =
@@ -41,12 +44,45 @@ type IntentPattern = {
 
 const intentPatterns: IntentPattern[] = [
   {
+    type: "memory_operation",
+    executionMode: "deterministic",
+    requiredTools: ["memory-planner", "memory-store"],
+    confidence: 0.9,
+    zh: [
+      /(?:请)?(?:帮我)?记住[:：\s]*.+/i,
+      /(?:你要记住|记一下)[:：\s]*.+/i,
+      /(?:忘记|忘掉|忘了|不要记住|别记了)[:：\s]*.+/i,
+      /(?:删除|删掉|移除|清除).*(?:个人记忆|记忆|记住)/i,
+      /(?:删除|删掉|移除|清除)(?:关于|有关)?.{1,80}?(?:的信息|的内容|相关信息|相关内容|这条信息|这件事)(?:吧)?$/i,
+    ],
+    en: [
+      /\b(?:remember|please remember)\b.+/i,
+      /\b(?:forget|delete memory|remove memory|clear memory)\b.+/i,
+    ],
+    rationale: {
+      zh: "用户要求新增、删除或修改个人记忆，适合先生成结构化记忆操作计划，再由本地存储执行。",
+      en: "The user asks to create, delete, or modify personal memory, suitable for a structured memory operation plan executed by local storage.",
+    },
+  },
+  {
+    type: "date_time",
+    executionMode: "deterministic",
+    requiredTools: ["date-calculator"],
+    confidence: 0.88,
+    zh: [/日期差|相差.*天|几天后|几天前|工作日|时间区间|时区|北京时间|UTC|GMT/i],
+    en: [/\b(date difference|days between|days after|days before|business days|workdays|timezone|time zone|UTC|GMT)\b/i],
+    rationale: {
+      zh: "用户要求进行日期、工作日或时区换算，适合由确定性日期时间工具处理。",
+      en: "The user asks for date, workday, or time-zone calculation, suitable for a deterministic date-time tool.",
+    },
+  },
+  {
     type: "calculate",
     executionMode: "deterministic",
     requiredTools: ["calculator"],
     confidence: 0.9,
-    zh: [/计算|算一下|求和|平均|百分比|占比|加起来|减去|乘以|除以|等于|总共|合计/],
-    en: [/\b(calculate|sum|average|percentage|ratio|plus|minus|times|divide|total)\b/i],
+    zh: [/计算|算一下|求和|平均|最小值|最大值|百分比|占比|加起来|减去|乘以|除以|等于|总共|合计/],
+    en: [/\b(calculate|sum|average|min|max|minimum|maximum|percentage|ratio|plus|minus|times|divide|total)\b/i],
     rationale: {
       zh: "用户要求进行数值计算，适合后续由确定性程序执行。",
       en: "The user asks for numeric computation, suitable for deterministic execution.",
@@ -74,6 +110,18 @@ const intentPatterns: IntentPattern[] = [
     rationale: {
       zh: "用户要求格式转换，适合后续由确定性格式化工具处理。",
       en: "The user asks for format conversion, suitable for a deterministic formatter.",
+    },
+  },
+  {
+    type: "text_stats",
+    executionMode: "deterministic",
+    requiredTools: ["text-statistics"],
+    confidence: 0.84,
+    zh: [/字数|词频|重复项|去重|分组计数|分组统计|文本统计|统计.+次数/i],
+    en: [/\b(word count|character count|frequency|duplicates?|dedupe|group count|text statistics)\b/i],
+    rationale: {
+      zh: "用户要求文本计数、词频、重复项或分组统计，适合由确定性文本统计工具处理。",
+      en: "The user asks for text counts, frequency, duplicates, or group counts, suitable for a deterministic text statistics tool.",
     },
   },
   {
