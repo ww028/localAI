@@ -42,21 +42,39 @@ type ChromeAiOptionCandidate = {
   createOptions?: Record<string, unknown>;
 };
 
-function getPromptOptionCandidates(locale: Locale): ChromeAiOptionCandidate[] {
-  const preferredLanguages = locale === "zh" ? ["zh", "zh-Hans", "en"] : ["en"];
-
+function getPromptOptionCandidates(): ChromeAiOptionCandidate[] {
   return [
-    ...preferredLanguages.map((language) => ({
+    {
       availabilityOptions: {
-        expectedInputs: [{ type: "text", languages: [language] }],
-        expectedOutputs: [{ type: "text", languages: [language] }],
+        expectedInputs: [{ type: "text", languages: ["en"] }],
+        expectedOutputs: [{ type: "text", languages: ["en"] }],
       },
       createOptions: {
-        expectedInputs: [{ type: "text", languages: [language] }],
-        expectedOutputs: [{ type: "text", languages: [language] }],
+        expectedInputs: [{ type: "text", languages: ["en"] }],
+        expectedOutputs: [{ type: "text", languages: ["en"] }],
       },
-    })),
+    },
     {},
+  ];
+}
+
+function getSummarizeOptionCandidates(locale: Locale): ChromeAiOptionCandidate[] {
+  if (locale === "zh") {
+    return [];
+  }
+
+  const summarizeOptions = {
+    type: "key-points",
+    format: "markdown",
+    length: "medium",
+    outputLanguage: "en",
+  };
+
+  return [
+    {
+      availabilityOptions: summarizeOptions,
+      createOptions: summarizeOptions,
+    },
   ];
 }
 
@@ -106,16 +124,7 @@ export const capabilityDefinitions: CapabilityDefinition[] = [
     task: "summarize",
     label: "Summarizer",
     globalName: "Summarizer",
-    availabilityOptions: {
-      type: "key-points",
-      format: "markdown",
-      length: "medium",
-    },
-    createOptions: {
-      type: "key-points",
-      format: "markdown",
-      length: "medium",
-    },
+    getOptionCandidates: getSummarizeOptionCandidates,
   },
   {
     task: "translate",

@@ -3,14 +3,28 @@ const DB_VERSION = 1;
 const STORE_NAME = "conversations";
 const runningTasks = new Set();
 
-function getPromptOptionCandidates(locale) {
-  const preferredLanguages = locale === "zh" ? ["zh", "zh-Hans", "en"] : ["en"];
+function getPromptOptionCandidates() {
   return [
-    ...preferredLanguages.map((language) => ({
-      expectedInputs: [{ type: "text", languages: [language] }],
-      expectedOutputs: [{ type: "text", languages: [language] }],
-    })),
+    {
+      expectedInputs: [{ type: "text", languages: ["en"] }],
+      expectedOutputs: [{ type: "text", languages: ["en"] }],
+    },
     undefined,
+  ];
+}
+
+function getSummarizeOptionCandidates(locale) {
+  if (locale === "zh") {
+    return [];
+  }
+
+  return [
+    {
+      type: "key-points",
+      format: "markdown",
+      length: "medium",
+      outputLanguage: "en",
+    },
   ];
 }
 
@@ -49,11 +63,7 @@ const taskDefinitions = {
   summarize: {
     globalName: "Summarizer",
     method: "summarize",
-    options: {
-      type: "key-points",
-      format: "markdown",
-      length: "medium",
-    },
+    getOptionCandidates: getSummarizeOptionCandidates,
   },
   translate: {
     globalName: "Translator",
@@ -261,6 +271,12 @@ async function handleRunTask(payload) {
     const result = await runAiTask(task, text, payload.conversation.locale, (status) =>
       updateConversationStatus(payload.conversation, status),
     );
+    const responseSources = payload.sources ?? [];
+    const cleanedResult = normalizeMemoryAnswerTone(
+      stripGeneratedSourceSection(result),
+      responseSources,
+      payload.conversation.locale,
+    );
     await saveConversation({
       ...payload.conversation,
       messages: [
@@ -268,8 +284,8 @@ async function handleRunTask(payload) {
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          text: result,
-          sources: payload.sources ?? [],
+          text: cleanedResult,
+          sources: responseSources,
         },
       ],
       status: "completed",
@@ -311,6 +327,59 @@ async function handleRunTask(payload) {
   } finally {
     runningTasks.delete(payload.conversation.id);
   }
+}
+
+function normalizeMemoryAnswerTone(text, sources, locale) {
+  const usesVisibleMemory = sources.some((source) => source.sourceType === "memory");
+  if (!usesVisibleMemory) {
+    return text;
+  }
+
+  const hasKnowledgeSources = sources.some((source) => source.sourceType === "knowledge");
+  let normalized = text.trimEnd();
+
+  if (!hasKnowledgeSources) {
+    normalized = normalized.replace(/\s*(?:\[[0-9]+\]\s*)+$/g, "");
+  }
+
+  if (locale === "zh") {
+    return normalizeChineseMemoryPerspective(normalized);
+  }
+
+  return normalized
+    .replace(/\bthe user's\b/gi, "your")
+    .replace(/\bthe user owns\b/gi, "you own")
+    .replace(/\bbased on the user's\b/gi, "based on your");
+}
+
+function normalizeChineseMemoryPerspective(text) {
+  const cjkFollowingFirstPerson = /我(?=[\u3400-\u9fff])/g;
+
+  return text
+    .replace(/根据用户/g, "根据你")
+    .replace(/用户的/g, "你的")
+    .replace(/用户/g, "你")
+    .replace(/我的/g, "你的")
+    .replace(cjkFollowingFirstPerson, "你");
+}
+
+function stripGeneratedSourceSection(text) {
+  const normalized = text.replace(/\r\n/g, "\n").trimEnd();
+  const lines = normalized.split("\n");
+  const sourceHeadingPattern = /^\s{0,3}(?:#{1,6}\s*)?(?:\*\*)?\s*(?:引用来源|参考来源|本地知识库来源|知识库来源|来源|Sources|References|Local knowledge sources?)\s*[:：]?\s*(?:\*\*)?\s*(?:（无）|\(none\)|none|无)?\s*$/i;
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line) {
+      continue;
+    }
+
+    if (sourceHeadingPattern.test(line)) {
+      return lines.slice(0, index).join("\n").trimEnd();
+    }
+  }
+
+  return normalized;
 }
 
 chrome.runtime.onMessage.addListener((message) => {

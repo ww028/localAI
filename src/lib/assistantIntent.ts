@@ -240,4 +240,3 @@ function extractEntities(text: string, type: AssistantIntentType) {
 
   return entities;
 }
-

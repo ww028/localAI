@@ -19,6 +19,22 @@ async function loadAssistantPromptModule() {
 
 const modulePromise = loadAssistantPromptModule();
 
+function createContextPlanFixture(overrides = {}) {
+  return {
+    subject: "external",
+    memoryMode: "answer_source",
+    knowledgeMode: "cite",
+    requiresLocalEvidence: false,
+    visibleSources: ["knowledge", "memory"],
+    shouldCompareWithGeneralKnowledge: false,
+    responseConstraints: [
+      "个人记忆里的第一人称表达来自用户原话，回答时要转换成自然二人称。",
+    ],
+    rationale: "测试上下文策略。",
+    ...overrides,
+  };
+}
+
 test("buildAssistantPrompt creates a partitioned Chinese assistant prompt", async () => {
   const { buildAssistantPrompt } = await modulePromise;
   const prompt = buildAssistantPrompt({
@@ -60,6 +76,7 @@ test("buildAssistantPrompt creates a partitioned Chinese assistant prompt", asyn
         result: 3,
       },
     },
+    contextPlan: createContextPlanFixture(),
     memories: [
       {
         id: "memory-1",
@@ -100,9 +117,12 @@ test("buildAssistantPrompt creates a partitioned Chinese assistant prompt", asyn
   assert.match(prompt, /结果：3/);
   assert.match(prompt, /不要重新计算/);
   assert.match(prompt, /最近会话上下文/);
+  assert.match(prompt, /上下文使用策略/);
+  assert.match(prompt, /"memoryMode": "answer_source"/);
   assert.match(prompt, /个人记忆/);
   assert.match(prompt, /本地知识库片段/);
-  assert.match(prompt, /\[M1\] 用户偏好: 用户偏好简洁直接的回答/);
+  assert.match(prompt, /用户原话记忆: 用户偏好简洁直接的回答/);
+  assert.match(prompt, /回答时必须改写成面向用户的自然二人称/);
   assert.match(prompt, /\[1\] roadmap\.md #1/);
   assert.match(prompt, /用户问题：\n这个项目下一步做什么？/);
 });
@@ -115,9 +135,15 @@ test("buildAssistantPrompt creates explicit empty sections in English", async ()
     memories: [],
     sources: [],
     recentMessages: [],
+    contextPlan: createContextPlanFixture({
+      memoryMode: "none",
+      knowledgeMode: "none",
+      visibleSources: [],
+    }),
   });
 
   assert.match(prompt, /Operating rules/);
+  assert.match(prompt, /Context Usage Plan/);
   assert.match(prompt, /Structured intent: none/);
   assert.match(prompt, /Structured plan: none/);
   assert.match(prompt, /Deterministic execution result: none/);

@@ -10,6 +10,8 @@ export type StoredChatMessage = {
   role: "assistant" | "user";
   text: string;
   sources?: Array<{
+    sourceType?: "knowledge" | "memory";
+    sourceLabel?: string;
     documentName: string;
     chunkIndex: number;
     text: string;

@@ -111,14 +111,37 @@ async function notifyChatTabAlreadyOpen() {
   }).catch(() => undefined);
 }
 
-async function getActiveReadablePage() {
+function normalizeLocale(locale) {
+  return locale === "en" ? "en" : "zh";
+}
+
+function getPageReadError(code, locale) {
+  const messages = {
+    noActiveTab: {
+      zh: "没有找到可读取的当前标签页。",
+      en: "No readable active tab found.",
+    },
+    cannotReadPage: {
+      zh: "当前页面不支持插件读取。",
+      en: "This page cannot be read by the extension.",
+    },
+    noText: {
+      zh: "当前页面没有可读取的正文。",
+      en: "No readable page text found.",
+    },
+  };
+
+  return messages[code][normalizeLocale(locale)];
+}
+
+async function getActiveReadablePage(locale) {
   const tab = await findReadableActiveTab();
   if (!tab?.id) {
-    throw new Error("No readable active tab found.");
+    throw new Error(getPageReadError("noActiveTab", locale));
   }
 
   if (!isInjectableUrl(tab.url)) {
-    throw new Error("This page cannot be read by the extension.");
+    throw new Error(getPageReadError("cannotReadPage", locale));
   }
 
   const [result] = await chrome.scripting.executeScript({
@@ -128,7 +151,7 @@ async function getActiveReadablePage() {
 
   const page = result?.result;
   if (!page?.text) {
-    throw new Error("No readable page text found.");
+    throw new Error(getPageReadError("noText", locale));
   }
 
   return page;
@@ -226,7 +249,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "GET_ACTIVE_PAGE_TEXT") {
-    void getActiveReadablePage()
+    void getActiveReadablePage(message.locale)
       .then((page) => sendResponse({ ok: true, page }))
       .catch((error) => {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });

@@ -3,7 +3,6 @@ import {
   Clipboard,
   Database,
   Download,
-  Ellipsis,
   FileText,
   Globe2,
   Languages,
@@ -11,14 +10,16 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Settings,
+  Upload,
   WandSparkles,
   SquareArrowOutUpRight,
-  ThumbsDown,
-  ThumbsUp,
   LoaderCircle,
+  Menu,
   PanelLeft,
   PanelRightOpen,
   Plus,
+  Search,
   Send,
   SquarePen,
   Trash2,
@@ -49,8 +50,14 @@ import {
   executeDeterministicTask,
   formatDeterministicExecution,
 } from "./lib/assistantDeterministicExecutor";
+import {
+  type ContextPlan,
+  createContextPlan,
+  shouldExpandMemorySearch,
+} from "./lib/assistantContextPlan";
 import { detectAssistantIntent } from "./lib/assistantIntent";
 import { createAssistantPlan } from "./lib/assistantPlanner";
+import { searchBuiltinKnowledge } from "./lib/builtinKnowledge";
 import {
   type AssistantMemory,
   type AssistantMemoryCommand,
@@ -77,10 +84,16 @@ import {
   rebuildKnowledgeIndex,
   searchKnowledge,
 } from "./lib/knowledgeStore";
+import {
+  exportAllIndexedDbData,
+  exportPortableAiData,
+  importAllIndexedDbData,
+} from "./lib/indexedDbBackup";
 
 type ChatMessage = StoredChatMessage;
 type MessageSource = NonNullable<ChatMessage["sources"]>[number];
 type Surface = "popup" | "sidepanel" | "tab";
+type OpenPopover = "history" | "skills" | "page" | "knowledge" | "memory" | "settings";
 type WebPageAction = "summary" | "qa" | "todos" | "notes";
 type TextAction = Extract<AiTask, "summarize" | "translate" | "write" | "rewrite">;
 type WebPageSnapshot = {
@@ -90,6 +103,8 @@ type WebPageSnapshot = {
   extractedAt?: number;
 };
 const SURFACE_CHANNEL = "localai-surface";
+const LOCALE_STORAGE_KEY = "localai-locale";
+const SIDEPANEL_WIDTH_GUIDE_STORAGE_KEY = "localai-sidepanel-width-guide-dismissed";
 const MAX_PAGE_CONTEXT_LENGTH = 16000;
 
 const translations: Record<
@@ -105,6 +120,8 @@ const translations: Record<
     complete: string;
     copy: string;
     copied: string;
+    downloadResponse: string;
+    regenerateResponse: string;
     clearKnowledge: string;
     deleteKnowledge: string;
     emptyKnowledge: string;
@@ -130,6 +147,8 @@ const translations: Record<
     pageReadError: string;
     sourcePreview: string;
     closeSourcePreview: string;
+    references: string;
+    sourceChunk: string;
     noKnowledgeUsed: string;
     appAlreadyOpen: string;
     openSidePanel: string;
@@ -142,6 +161,10 @@ const translations: Record<
     history: string;
     emptyHistory: string;
     newConversation: string;
+    collapseSidebar: string;
+    openSidebar: string;
+    recentTopics: string;
+    searchConversations: string;
     knowledge: string;
     moreSkills: string;
     unavailableHint: string;
@@ -166,19 +189,32 @@ const translations: Record<
     writeText: string;
     rewriteText: string;
     textActionInputRequired: string;
+    sidePanelWidthGuide: string;
+    sidePanelWidthGuideAction: string;
+    settings: string;
+    exportBackup: string;
+    exportPortableData: string;
+    importData: string;
+    dataExported: string;
+    portableDataExported: string;
+    dataImported: string;
+    dataImportInvalid: string;
+    importDataConfirm: string;
   }
 > = {
   zh: {
-    eyebrow: "Chrome 内置 AI",
-    title: "新工作任务",
-    subtitle: "本地模型 · 浏览器内运行",
+    eyebrow: "Chrome 内置模型 · Gemini Nano",
+    title: "新对话",
+    subtitle: "完全脱离互联网的本地模型。你不用担心任何隐私问题\n我们不会上传任何数据到服务器，所有数据都保存在你自己的电脑上",
     heroQuestion: "有什么我能帮你的吗？",
-    placeholder: "发消息或按住 Fn 说话，/ 选择技能",
+    placeholder: "输入消息，或点击 + 选择操作",
     send: "发送",
     checking: "检查中",
     complete: "完成",
     copy: "复制",
     copied: "复制成功",
+    downloadResponse: "下载为 Word",
+    regenerateResponse: "重新回答",
     clearKnowledge: "清空知识库",
     deleteKnowledge: "删除知识文件",
     emptyKnowledge: "暂无知识文件",
@@ -204,6 +240,8 @@ const translations: Record<
     pageReadError: "无法读取当前网页",
     sourcePreview: "引用片段",
     closeSourcePreview: "关闭引用预览",
+    references: "引用来源",
+    sourceChunk: "片段",
     noKnowledgeUsed: "未检索到相关知识",
     appAlreadyOpen: "插件已经打开了",
     openSidePanel: "打开侧边栏",
@@ -216,8 +254,12 @@ const translations: Record<
     history: "历史对话",
     emptyHistory: "暂无历史对话",
     newConversation: "新建对话",
-    knowledge: "浏览器知识",
-    moreSkills: "更多技能",
+    collapseSidebar: "收起侧边栏",
+    openSidebar: "打开侧边栏",
+    recentTopics: "近期话题",
+    searchConversations: "搜索历史话题",
+    knowledge: "知识库",
+    moreSkills: "更多操作",
     unavailableHint: "当前 Prompt API 不可用，请检查 Chrome 版本、flags 或模型下载状态。",
     statusLabels: {
       available: "可用",
@@ -248,18 +290,31 @@ const translations: Record<
     writeText: "写作",
     rewriteText: "润色改写",
     textActionInputRequired: "请输入要处理的文本",
+    sidePanelWidthGuide: "如果侧边栏太窄，可以拖动侧边栏左侧边缘向左拉宽。",
+    sidePanelWidthGuideAction: "知道了",
+    settings: "设置",
+    exportBackup: "导出备份",
+    exportPortableData: "导出通用数据",
+    importData: "导入数据",
+    dataExported: "备份已导出",
+    portableDataExported: "通用数据已导出",
+    dataImported: "数据已导入",
+    dataImportInvalid: "导入文件格式不合规",
+    importDataConfirm: "导入会覆盖当前本地数据，是否继续？",
   },
   en: {
-    eyebrow: "Chrome Built-in AI",
-    title: "New Work Task",
-    subtitle: "Local model · Runs in the browser",
+    eyebrow: "Chrome built-in model · Gemini Nano",
+    title: "New chat",
+    subtitle: "Fully offline local model. You do not need to worry about privacy.\nWe do not upload any data to a server; everything stays on your computer.",
     heroQuestion: "What can I help with?",
-    placeholder: "Send a message, hold Fn to talk, or use / for skills",
+    placeholder: "Type a message, or click + for actions",
     send: "Send",
     checking: "checking",
     complete: "Complete",
     copy: "Copy",
     copied: "Copied",
+    downloadResponse: "Download as Word",
+    regenerateResponse: "Regenerate response",
     clearKnowledge: "Clear knowledge",
     deleteKnowledge: "Delete knowledge file",
     emptyKnowledge: "No knowledge files",
@@ -285,6 +340,8 @@ const translations: Record<
     pageReadError: "Failed to read current page",
     sourcePreview: "Source snippet",
     closeSourcePreview: "Close source preview",
+    references: "Sources",
+    sourceChunk: "chunk",
     noKnowledgeUsed: "No relevant knowledge found",
     appAlreadyOpen: "localAI is already open",
     openSidePanel: "Open side panel",
@@ -297,8 +354,12 @@ const translations: Record<
     history: "Conversation history",
     emptyHistory: "No conversations yet",
     newConversation: "New conversation",
-    knowledge: "Browser knowledge",
-    moreSkills: "More skills",
+    collapseSidebar: "Collapse sidebar",
+    openSidebar: "Open sidebar",
+    recentTopics: "Recent topics",
+    searchConversations: "Search conversations",
+    knowledge: "Knowledge base",
+    moreSkills: "More actions",
     unavailableHint: "Prompt API is unavailable. Check Chrome version, flags, or model download state.",
     statusLabels: {
       available: "available",
@@ -329,6 +390,17 @@ const translations: Record<
     writeText: "Write",
     rewriteText: "Polish rewrite",
     textActionInputRequired: "Enter text to process",
+    sidePanelWidthGuide: "If the side panel feels too narrow, drag its left edge to the left to make it wider.",
+    sidePanelWidthGuideAction: "Got it",
+    settings: "Settings",
+    exportBackup: "Export backup",
+    exportPortableData: "Export portable data",
+    importData: "Import data",
+    dataExported: "Backup exported",
+    portableDataExported: "Portable data exported",
+    dataImported: "Data imported",
+    dataImportInvalid: "Import file format is invalid",
+    importDataConfirm: "Importing will replace current local data. Continue?",
   },
 };
 
@@ -349,8 +421,11 @@ function getInitialSurface(): Surface {
   }
 
   const chromeApi = getChromeExtensionApi();
-  if (chromeApi?.runtime?.id && (window.innerWidth < 700 || window.innerHeight > 700)) {
+  if (chromeApi?.runtime?.id && window.innerWidth < 700) {
     return "sidepanel";
+  }
+  if (window.innerWidth > 900 || window.innerHeight > 700) {
+    return "tab";
   }
 
   return "popup";
@@ -362,7 +437,7 @@ function getDefaultComposerHeight(surface: Surface) {
   }
 
   if (surface === "tab") {
-    return clampComposerHeight(180, surface);
+    return clampComposerHeight(154, surface);
   }
 
   return 108;
@@ -374,7 +449,7 @@ function getMinComposerHeight(surface: Surface) {
   }
 
   if (surface === "tab") {
-    return 160;
+    return 136;
   }
 
   return 108;
@@ -386,10 +461,47 @@ function clampComposerHeight(height: number, surface: Surface) {
   return Math.min(Math.max(height, minHeight), maxHeight);
 }
 
+function getInitialLocale(): Locale {
+  try {
+    const storedLocale = window.localStorage.getItem(LOCALE_STORAGE_KEY);
+    if (storedLocale === "zh" || storedLocale === "en") {
+      return storedLocale;
+    }
+  } catch {
+    // Ignore storage access errors and fall back to browser language.
+  }
+
+  return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function saveLocalePreference(locale: Locale) {
+  try {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  } catch {
+    // Locale preference is non-critical; the app can still run without persistence.
+  }
+}
+
+function hasDismissedSidePanelWidthGuide() {
+  try {
+    return window.localStorage.getItem(SIDEPANEL_WIDTH_GUIDE_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function saveSidePanelWidthGuideDismissed() {
+  try {
+    window.localStorage.setItem(SIDEPANEL_WIDTH_GUIDE_STORAGE_KEY, "true");
+  } catch {
+    // The guide can still be dismissed for the current session without persistence.
+  }
+}
+
 export function App() {
   const [surface] = useState<Surface>(() => getInitialSurface());
   const canResizeComposer = surface !== "popup";
-  const [locale, setLocale] = useState<Locale>("zh");
+  const [locale, setLocale] = useState<Locale>(() => getInitialLocale());
   const [conversationId, setConversationId] = useState<string>(() => crypto.randomUUID());
   const [conversationCreatedAt, setConversationCreatedAt] = useState(() => Date.now());
   const [input, setInput] = useState("");
@@ -414,6 +526,12 @@ export function App() {
   const [editingMemoryId, setEditingMemoryId] = useState<string | undefined>();
   const [editingMemoryContent, setEditingMemoryContent] = useState("");
   const [editingMemoryType, setEditingMemoryType] = useState<AssistantMemoryType>("fact");
+  const [isHistorySidebarCollapsed, setIsHistorySidebarCollapsed] = useState(() => surface === "tab");
+  const [historySearchQuery, setHistorySearchQuery] = useState("");
+  const [openPopover, setOpenPopover] = useState<OpenPopover | undefined>();
+  const [showSidePanelWidthGuide, setShowSidePanelWidthGuide] = useState(
+    () => !hasDismissedSidePanelWidthGuide(),
+  );
   const [sourcePreview, setSourcePreview] = useState<{
     messageId: string;
     index: number;
@@ -422,6 +540,7 @@ export function App() {
   const [composerHeight, setComposerHeight] = useState(() => getDefaultComposerHeight(surface));
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const dataImportInputRef = useRef<HTMLInputElement | null>(null);
   const pendingSaveRef = useRef(false);
   const composerHeightRef = useRef(composerHeight);
 
@@ -460,6 +579,34 @@ export function App() {
   useEffect(() => {
     composerHeightRef.current = composerHeight;
   }, [composerHeight]);
+
+  useEffect(() => {
+    if (!openPopover) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest("[data-popover-root]")) {
+        return;
+      }
+
+      setOpenPopover(undefined);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenPopover(undefined);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openPopover]);
 
   useEffect(() => {
     if (!canResizeComposer) {
@@ -588,19 +735,19 @@ export function App() {
 
     const latestConversation = conversations[0];
     if (!latestConversation) {
+      clearChat();
       return;
     }
 
     setConversationId(latestConversation.id);
     setConversationCreatedAt(latestConversation.createdAt);
-    setLocale(latestConversation.locale);
     setMessages(latestConversation.messages);
     setSourcePreview(undefined);
     setConversationStatus(latestConversation.status);
     setTaskState(latestConversation.taskState);
     setIsRunning(isConversationActive(latestConversation.status));
     if (isConversationActive(latestConversation.status)) {
-      setProgress(formatTaskStatus(latestConversation.status, latestConversation.locale));
+      setProgress(formatTaskStatus(latestConversation.status, locale));
     }
   }
 
@@ -630,7 +777,17 @@ export function App() {
   }
 
   function changeLocale(nextLocale: Locale) {
+    saveLocalePreference(nextLocale);
     setLocale(nextLocale);
+  }
+
+  function togglePopover(popover: OpenPopover) {
+    setOpenPopover((current) => current === popover ? undefined : popover);
+  }
+
+  function dismissSidePanelWidthGuide() {
+    saveSidePanelWidthGuideDismissed();
+    setShowSidePanelWidthGuide(false);
   }
 
   async function handleRun() {
@@ -658,9 +815,50 @@ export function App() {
       return;
     }
 
-    const sources = await searchKnowledge(trimmedInput, 5, activeKnowledgeSpaceId);
-    const memories = await searchAssistantMemories(trimmedInput, 5);
+    const sources = await resolveKnowledgeSources(trimmedInput, locale, activeKnowledgeSpaceId);
     const intent = detectAssistantIntent(trimmedInput, locale);
+    const memoryContext = await resolveAssistantMemories(trimmedInput, locale);
+    const contextPlan = createContextPlan({
+      question: trimmedInput,
+      locale,
+      intent,
+      sources,
+      memories: memoryContext.promptMemories,
+      sourceMemories: memoryContext.sourceMemories,
+    });
+    const messageSources = createMessageSources(sources, memoryContext.sourceMemories, contextPlan, locale);
+    const noLocalContextAnswer = createNoLocalEntityAnswer(contextPlan, messageSources, locale);
+    if (noLocalContextAnswer) {
+      const now = Date.now();
+      const completedConversation: StoredConversation = {
+        id: conversationId,
+        title: trimmedInput.slice(0, 48),
+        locale,
+        messages: [
+          ...nextMessages,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            text: noLocalContextAnswer,
+            sources: [],
+          },
+        ],
+        status: "completed",
+        createdAt: conversationCreatedAt,
+        updatedAt: now,
+      };
+
+      await saveConversation(completedConversation);
+      setMessages(completedConversation.messages);
+      setConversationStatus(completedConversation.status);
+      setTaskState(undefined);
+      setIsRunning(false);
+      setProgress("");
+      setProgressRatio(undefined);
+      pendingSaveRef.current = false;
+      await refreshHistory();
+      return;
+    }
     const plan = createAssistantPlan(intent, trimmedInput, locale);
     const deterministicExecution = executeDeterministicTask(trimmedInput, intent, plan, locale);
     const prompt = buildAssistantPrompt({
@@ -669,8 +867,9 @@ export function App() {
       intent,
       plan,
       deterministicExecution,
+      contextPlan,
       sources,
-      memories,
+      memories: memoryContext.promptMemories,
       recentMessages: messages,
     });
     const now = Date.now();
@@ -704,7 +903,7 @@ export function App() {
     await refreshHistory();
 
     try {
-      if (await submitBackgroundTask(conversation, prompt, sources)) {
+      if (await submitBackgroundTask(conversation, prompt, messageSources)) {
         setProgress(locale === "zh" ? "后台推理中" : "Running in background");
       } else {
         const result = await runAiTask({
@@ -716,6 +915,12 @@ export function App() {
             setProgressRatio(nextProgress.ratio);
           },
         });
+        const cleanedResult = formatContextAwareAnswer(
+          stripGeneratedSourceSection(result),
+          contextPlan,
+          messageSources,
+          locale,
+        );
         const completedConversation = {
           ...conversation,
           messages: [
@@ -723,8 +928,8 @@ export function App() {
             {
               id: crypto.randomUUID(),
               role: "assistant" as const,
-              text: result,
-              sources,
+              text: cleanedResult,
+              sources: messageSources,
             },
           ],
           status: "completed" as const,
@@ -752,7 +957,7 @@ export function App() {
             id: crypto.randomUUID(),
             role: "assistant" as const,
             text: message,
-            sources,
+            sources: messageSources,
           },
         ],
         status: deterministicExecution.handled ? "completed" as const : "failed" as const,
@@ -776,6 +981,7 @@ export function App() {
   }
 
   async function handleTextAction(task: TextAction) {
+    setOpenPopover(undefined);
     const trimmedInput = input.trim();
     if (!trimmedInput) {
       setToast(copy.textActionInputRequired);
@@ -890,6 +1096,7 @@ export function App() {
   }
 
   async function handleWebPageAction(action: WebPageAction) {
+    setOpenPopover(undefined);
     if (isRunning || isReadingPage) {
       return;
     }
@@ -903,7 +1110,7 @@ export function App() {
 
     try {
       const question = input.trim();
-      const page = await fetchActivePageText();
+      const page = await fetchActivePageText(locale);
       const userText = formatWebPageUserMessage(action, page, question, locale);
       const prompt = buildWebPagePrompt(action, page, question, locale);
       setInput("");
@@ -1008,6 +1215,7 @@ export function App() {
   }
 
   async function handleSavePageToKnowledge() {
+    setOpenPopover(undefined);
     if (isRunning || isReadingPage) {
       return;
     }
@@ -1018,8 +1226,8 @@ export function App() {
     setProgressRatio(undefined);
 
     try {
-      const page = await fetchActivePageText();
-      const file = createWebPageKnowledgeFile(page);
+      const page = await fetchActivePageText(locale);
+      const file = createWebPageKnowledgeFile(page, locale);
       const documents = await importKnowledgeFiles([file], activeKnowledgeSpaceId);
       await refreshKnowledgeCount();
       setToast(`${copy.pageSavedToKnowledge}: ${documents[0]?.name ?? page.title}`);
@@ -1221,7 +1429,231 @@ export function App() {
     setToast(copy.copied);
   }
 
+  function downloadMessageAsWord(message: ChatMessage) {
+    const messageIndex = messages.findIndex((item) => item.id === message.id);
+    const previousUserMessage = messageIndex > 0
+      ? [...messages].slice(0, messageIndex).reverse().find((item) => item.role === "user")
+      : undefined;
+    const title = sanitizeFileName(previousUserMessage?.text ?? "localai-response");
+    const html = createWordDocumentHtml(message.text, previousUserMessage?.text, locale);
+    const blob = new Blob(["\ufeff", html], { type: "application/msword;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${title}-${new Date().toISOString().slice(0, 10)}.doc`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+    setToast(copy.downloadResponse);
+  }
+
+  async function handleRegenerateMessage(messageId: string) {
+    if (isRunning) {
+      return;
+    }
+
+    const assistantIndex = messages.findIndex((message) => message.id === messageId);
+    if (assistantIndex < 0 || messages[assistantIndex]?.role !== "assistant") {
+      return;
+    }
+
+    const userIndex = [...messages]
+      .slice(0, assistantIndex)
+      .reverse()
+      .findIndex((message) => message.role === "user");
+    if (userIndex < 0) {
+      return;
+    }
+
+    const originalUserIndex = assistantIndex - userIndex - 1;
+    const userMessage = messages[originalUserIndex];
+    const trimmedInput = userMessage.text.trim();
+    if (!trimmedInput) {
+      return;
+    }
+
+    const baseMessages = messages.slice(0, assistantIndex);
+    const regeneratingMessages = messages.map((message) =>
+      message.id === messageId
+        ? {
+            ...message,
+            text: locale === "zh" ? "正在重新回答..." : "Regenerating response...",
+            sources: [],
+          }
+        : message,
+    );
+    const sources = await resolveKnowledgeSources(trimmedInput, locale, activeKnowledgeSpaceId);
+    const intent = detectAssistantIntent(trimmedInput, locale);
+    const memoryContext = await resolveAssistantMemories(trimmedInput, locale);
+    const contextPlan = createContextPlan({
+      question: trimmedInput,
+      locale,
+      intent,
+      sources,
+      memories: memoryContext.promptMemories,
+      sourceMemories: memoryContext.sourceMemories,
+    });
+    const messageSources = createMessageSources(sources, memoryContext.sourceMemories, contextPlan, locale);
+    const noLocalContextAnswer = createNoLocalEntityAnswer(contextPlan, messageSources, locale);
+    if (noLocalContextAnswer) {
+      const completedMessages = messages.map((message) =>
+        message.id === messageId
+          ? {
+              ...message,
+              text: noLocalContextAnswer,
+              sources: [],
+            }
+          : message,
+      );
+      const completedConversation: StoredConversation = {
+        id: conversationId,
+        title: trimmedInput.slice(0, 48),
+        locale,
+        messages: completedMessages,
+        status: "completed",
+        createdAt: conversationCreatedAt,
+        updatedAt: Date.now(),
+      };
+
+      await saveConversation(completedConversation);
+      setMessages(completedMessages);
+      setConversationStatus(completedConversation.status);
+      setTaskState(undefined);
+      setIsRunning(false);
+      setProgress("");
+      setProgressRatio(undefined);
+      pendingSaveRef.current = false;
+      await refreshHistory();
+      return;
+    }
+    const plan = createAssistantPlan(intent, trimmedInput, locale);
+    const deterministicExecution = executeDeterministicTask(trimmedInput, intent, plan, locale);
+    const prompt = buildAssistantPrompt({
+      question: trimmedInput,
+      locale,
+      intent,
+      plan,
+      deterministicExecution,
+      contextPlan,
+      sources,
+      memories: memoryContext.promptMemories,
+      recentMessages: baseMessages.slice(0, -1),
+    });
+    const now = Date.now();
+    const nextTaskState = createStoredTaskState({
+      kind: "chat",
+      aiTask: "prompt",
+      status: "queued",
+      originalInput: trimmedInput,
+      promptText: prompt,
+      sources,
+      intent,
+      plan,
+      deterministicExecution,
+      now,
+    });
+    const queuedConversation: StoredConversation = {
+      id: conversationId,
+      title: trimmedInput.slice(0, 48),
+      locale,
+      messages: regeneratingMessages,
+      status: "queued",
+      taskState: nextTaskState,
+      createdAt: conversationCreatedAt,
+      updatedAt: now,
+    };
+
+    pendingSaveRef.current = true;
+    setIsRunning(true);
+    setError("");
+    setSourcePreview(undefined);
+    setProgressRatio(undefined);
+    setProgress(formatTaskStatus("queued", locale));
+    setMessages(regeneratingMessages);
+    setConversationStatus("queued");
+    setTaskState(nextTaskState);
+    await saveConversation(queuedConversation);
+    await refreshHistory();
+
+    try {
+      const result = await runAiTask({
+        task: "prompt",
+        text: prompt,
+        locale,
+        onProgress(nextProgress) {
+          setProgress(nextProgress.message);
+          setProgressRatio(nextProgress.ratio);
+        },
+      });
+      const cleanedResult = formatContextAwareAnswer(
+        stripGeneratedSourceSection(result),
+        contextPlan,
+        messageSources,
+        locale,
+      );
+      const completedMessages = messages.map((message) =>
+        message.id === messageId
+          ? {
+              ...message,
+              text: cleanedResult,
+              sources: messageSources,
+            }
+          : message,
+      );
+      const completedConversation: StoredConversation = {
+        ...queuedConversation,
+        messages: completedMessages,
+        status: "completed",
+        taskState: updateStoredTaskState(nextTaskState, "completed"),
+        updatedAt: Date.now(),
+      };
+      await saveConversation(completedConversation);
+      setMessages(completedMessages);
+      setConversationStatus(completedConversation.status);
+      setTaskState(completedConversation.taskState);
+      setProgress(copy.complete);
+      await refreshHistory();
+      await refreshCapabilities();
+    } catch (reason) {
+      const message = deterministicExecution.handled
+        ? formatDeterministicExecution(deterministicExecution, locale)
+        : reason instanceof Error ? reason.message : copy.taskError;
+      const failedMessages = messages.map((chatMessage) =>
+        chatMessage.id === messageId
+          ? {
+              ...chatMessage,
+              text: message,
+              sources: messageSources,
+            }
+          : chatMessage,
+      );
+      const failedConversation: StoredConversation = {
+        ...queuedConversation,
+        messages: failedMessages,
+        status: deterministicExecution.handled ? "completed" : "failed",
+        taskState: updateStoredTaskState(
+          nextTaskState,
+          deterministicExecution.handled ? "completed" : "failed",
+          deterministicExecution.handled ? undefined : message,
+        ),
+        updatedAt: Date.now(),
+      };
+      await saveConversation(failedConversation);
+      setMessages(failedMessages);
+      setConversationStatus(failedConversation.status);
+      setTaskState(failedConversation.taskState);
+      setError(deterministicExecution.handled ? "" : message);
+      setProgress(deterministicExecution.handled ? copy.complete : "");
+      await refreshHistory();
+    } finally {
+      setIsRunning(false);
+      pendingSaveRef.current = false;
+    }
+  }
+
   async function handleKnowledgeImport(files: FileList | null) {
+    setOpenPopover(undefined);
     const supportedFiles = Array.from(files ?? []).filter((file) =>
       /\.(md|txt)$/i.test(file.name),
     );
@@ -1340,6 +1772,84 @@ export function App() {
     setToast(copy.exportMemories);
   }
 
+  async function handleDataExport() {
+    setOpenPopover(undefined);
+    try {
+      const json = await exportAllIndexedDbData();
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `localai-indexeddb-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+      setToast(copy.dataExported);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : copy.taskError;
+      setError(message);
+      setToast(message);
+    }
+  }
+
+  async function handlePortableDataExport() {
+    setOpenPopover(undefined);
+    try {
+      const jsonl = await exportPortableAiData();
+      const blob = new Blob([jsonl], { type: "application/x-ndjson;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `localai-portable-data-${new Date().toISOString().slice(0, 10)}.jsonl`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+      setToast(copy.portableDataExported);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : copy.taskError;
+      setError(message);
+      setToast(message);
+    }
+  }
+
+  async function handleDataImport(files: FileList | null) {
+    setOpenPopover(undefined);
+    const file = files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const json = await file.text();
+      if (!window.confirm(copy.importDataConfirm)) {
+        return;
+      }
+
+      const result = await importAllIndexedDbData(json);
+      await loadLatestConversation();
+      const spaces = await listKnowledgeSpaces();
+      const nextSpaceId = spaces.some((space) => space.id === activeKnowledgeSpaceId)
+        ? activeKnowledgeSpaceId
+        : spaces[0]?.id ?? "default";
+      setKnowledgeSpaces(spaces);
+      setActiveKnowledgeSpaceId(nextSpaceId);
+      await refreshKnowledgeCount(nextSpaceId);
+      await refreshAssistantMemories();
+      setError("");
+      setToast(`${copy.dataImported}: ${result.recordCount}`);
+    } catch (reason) {
+      const message = reason instanceof Error ? `${copy.dataImportInvalid}: ${reason.message}` : copy.dataImportInvalid;
+      setError(message);
+      setToast(message);
+    } finally {
+      if (dataImportInputRef.current) {
+        dataImportInputRef.current.value = "";
+      }
+    }
+  }
+
   async function openSidePanel() {
     const chromeApi = getChromeExtensionApi();
     if (!chromeApi?.runtime?.id || !chromeApi.sidePanel?.open || !chromeApi.windows?.getLastFocused) {
@@ -1429,6 +1939,7 @@ export function App() {
     window.addEventListener("pointerup", handlePointerUp);
   }
 
+  const isEmptyConversation = messages.length === 0 && !isRunning;
   const composerStyle = canResizeComposer
     ? ({
         "--composer-height": `${composerHeight}px`,
@@ -1441,50 +1952,200 @@ export function App() {
     ? `${formatTaskKind(taskState.kind, locale)} · ${formatTaskStatus(conversationStatus, locale)}`
     : "";
 
+  function selectConversation(conversation: StoredConversation) {
+    pendingSaveRef.current = false;
+    setConversationId(conversation.id);
+    setConversationCreatedAt(conversation.createdAt);
+    setMessages(conversation.messages);
+    setConversationStatus(conversation.status);
+    setTaskState(conversation.taskState);
+    setIsRunning(isConversationActive(conversation.status));
+    setSourcePreview(undefined);
+    setError("");
+    setProgress(isConversationActive(conversation.status)
+      ? formatTaskStatus(conversation.status, locale)
+      : "");
+    setProgressRatio(undefined);
+    setOpenPopover(undefined);
+  }
+
+  function renderHistoryItems(items = history) {
+    if (!items.length) {
+      return <div className="history-empty">{copy.emptyHistory}</div>;
+    }
+
+    return items.map((conversation) => (
+      <button
+        key={conversation.id}
+        className={conversation.id === conversationId ? "history-item active" : "history-item"}
+        type="button"
+        onClick={() => selectConversation(conversation)}
+      >
+        <span>{conversation.title}</span>
+        <time>{formatHistoryTime(conversation.updatedAt, locale)}</time>
+      </button>
+    ));
+  }
+
+  const filteredHistory = historySearchQuery.trim()
+    ? history.filter((conversation) => conversation.title.toLowerCase().includes(historySearchQuery.trim().toLowerCase()))
+    : history;
+
+  function renderSettingsPopover() {
+    return (
+      <div
+        className={`settings-popover ${openPopover === "settings" ? "open" : ""}`}
+        role="dialog"
+        aria-label={copy.settings}
+      >
+        <button type="button" onClick={() => void handleDataExport()}>
+          <Download size={18} />
+          <span>{copy.exportBackup}</span>
+        </button>
+        <button type="button" onClick={() => void handlePortableDataExport()}>
+          <FileText size={18} />
+          <span>{copy.exportPortableData}</span>
+        </button>
+        <button type="button" onClick={() => dataImportInputRef.current?.click()}>
+          <Upload size={18} />
+          <span>{copy.importData}</span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     <main className={`app-shell ${surface}-surface`}>
-      <section className="workspace">
-        <header className="topbar">
-          <div className="topbar-left">
-            <div className="history-control">
-              <button className="history-button" type="button" title={copy.history} aria-label={copy.history}>
+      <section className={`workspace ${surface === "tab" && isHistorySidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+        {surface === "tab" ? (
+          <aside
+            className={`history-sidebar ${isHistorySidebarCollapsed ? "collapsed" : ""}`}
+            aria-label={copy.history}
+          >
+            <div className="history-sidebar-brand">
+              <span className="brand-mark" aria-hidden="true">L</span>
+              <button
+                className="sidebar-collapse-button"
+                type="button"
+                onClick={() => setIsHistorySidebarCollapsed(true)}
+                title={copy.collapseSidebar}
+                aria-label={copy.collapseSidebar}
+              >
                 <PanelLeft size={22} />
               </button>
-              <div className="history-popover" role="list" aria-label={copy.history}>
-                <div className="history-title">{copy.history}</div>
-                {history.length ? (
-                  history.map((conversation) => (
-                    <button
-                      key={conversation.id}
-                      className="history-item"
-                      type="button"
-                      onClick={() => {
-                        pendingSaveRef.current = false;
-                        setConversationId(conversation.id);
-                        setConversationCreatedAt(conversation.createdAt);
-                        setLocale(conversation.locale);
-                        setMessages(conversation.messages);
-                        setConversationStatus(conversation.status);
-                        setTaskState(conversation.taskState);
-                        setIsRunning(isConversationActive(conversation.status));
-                        setSourcePreview(undefined);
-                        setError("");
-                        setProgress(isConversationActive(conversation.status)
-                          ? formatTaskStatus(conversation.status, conversation.locale)
-                          : "");
-                        setProgressRatio(undefined);
-                      }}
-                    >
-                      <span>{conversation.title}</span>
-                      <time>{formatHistoryTime(conversation.updatedAt, locale)}</time>
-                    </button>
-                  ))
-                ) : (
-                  <div className="history-empty">{copy.emptyHistory}</div>
-                )}
+            </div>
+            <div className="history-sidebar-rail">
+              <div className="history-sidebar-rail-main">
+                <button
+                  className="sidebar-expand-button"
+                  type="button"
+                  onClick={() => setIsHistorySidebarCollapsed(false)}
+                  data-tooltip={copy.openSidebar}
+                  title={copy.openSidebar}
+                  aria-label={copy.openSidebar}
+                >
+                  <Menu size={23} />
+                </button>
+                <button
+                  className="sidebar-rail-action"
+                  type="button"
+                  onClick={clearChat}
+                  data-tooltip={copy.newConversation}
+                  title={copy.newConversation}
+                  aria-label={copy.newConversation}
+                >
+                  <SquarePen size={23} />
+                </button>
+              </div>
+              <div className="settings-control sidebar-rail-settings" data-popover-root>
+                <button
+                  className="sidebar-rail-action"
+                  type="button"
+                  onClick={() => togglePopover("settings")}
+                  data-tooltip={copy.settings}
+                  title={copy.settings}
+                  aria-label={copy.settings}
+                  aria-expanded={openPopover === "settings"}
+                  aria-haspopup="dialog"
+                >
+                  <Settings size={23} />
+                </button>
+                {renderSettingsPopover()}
               </div>
             </div>
-            <button className="new-chat-button" type="button" onClick={clearChat} title={copy.newConversation} aria-label={copy.newConversation}>
+            {isHistorySidebarCollapsed ? (
+              null
+            ) : (
+              <>
+                <button className="history-sidebar-action" type="button" onClick={clearChat}>
+                  <SquarePen size={22} />
+                  <span>{copy.newConversation}</span>
+                </button>
+                <label className="history-sidebar-search">
+                  <Search size={22} />
+                  <input
+                    value={historySearchQuery}
+                    onChange={(event) => setHistorySearchQuery(event.target.value)}
+                    placeholder={copy.searchConversations}
+                    aria-label={copy.searchConversations}
+                  />
+                </label>
+                <div className="history-sidebar-title">
+                  <span>{copy.recentTopics}</span>
+                  <strong>{filteredHistory.length}</strong>
+                </div>
+                <div className="history-sidebar-list" role="list">
+                  {renderHistoryItems(filteredHistory)}
+                </div>
+                <div className="settings-control history-sidebar-settings" data-popover-root>
+                  <button
+                    className="history-sidebar-action"
+                    type="button"
+                    onClick={() => togglePopover("settings")}
+                    title={copy.settings}
+                    aria-label={copy.settings}
+                    aria-expanded={openPopover === "settings"}
+                    aria-haspopup="dialog"
+                  >
+                    <Settings size={22} />
+                    <span>{copy.settings}</span>
+                  </button>
+                  {renderSettingsPopover()}
+                </div>
+              </>
+            )}
+          </aside>
+        ) : null}
+        <header className="topbar">
+          <div className="topbar-left">
+            <div className="history-control" data-popover-root>
+              <button
+                className="history-button"
+                type="button"
+                onClick={() => togglePopover("history")}
+                title={copy.history}
+                aria-label={copy.history}
+                aria-expanded={openPopover === "history"}
+                aria-haspopup="dialog"
+              >
+                <PanelLeft size={22} />
+              </button>
+              <div
+                className={`history-popover ${openPopover === "history" ? "open" : ""}`}
+                role="list"
+                aria-label={copy.history}
+              >
+                <div className="history-title">{copy.history}</div>
+                {renderHistoryItems()}
+              </div>
+            </div>
+            <button
+              className="new-chat-button"
+              type="button"
+              onClick={clearChat}
+              title={copy.newConversation}
+              aria-label={copy.newConversation}
+            >
               <SquarePen size={22} />
             </button>
           </div>
@@ -1534,7 +2195,21 @@ export function App() {
           </div>
         </header>
 
-        <section className={`panel chat-panel ${shouldShowTaskStatus ? "has-task-state" : ""}`} aria-label={copy.chatLabel}>
+        <section
+          className={`panel chat-panel ${shouldShowTaskStatus ? "has-task-state" : ""} ${
+            isEmptyConversation ? "empty-chat" : ""
+          }`}
+          aria-label={copy.chatLabel}
+        >
+          {surface === "sidepanel" && showSidePanelWidthGuide ? (
+            <div className="sidepanel-width-guide" role="note">
+              <span>{copy.sidePanelWidthGuide}</span>
+              <button type="button" onClick={dismissSidePanelWidthGuide}>
+                {copy.sidePanelWidthGuideAction}
+              </button>
+            </div>
+          ) : null}
+
           {typeof progressRatio === "number" && (
             <div className="progress-track">
               <div className="progress-bar" style={{ width: `${Math.min(progressRatio * 100, 100)}%` }} />
@@ -1563,7 +2238,7 @@ export function App() {
           ) : null}
 
           <div ref={messageListRef} className="message-list" aria-live="polite">
-            {messages.length === 0 && !isRunning ? (
+            {isEmptyConversation ? (
               <div className="empty-state">
                 <h2>{copy.heroQuestion}</h2>
                 <p>{copy.subtitle}</p>
@@ -1584,30 +2259,47 @@ export function App() {
                     </div>
                     {message.role === "assistant" && (
                       <div className="message-actions" aria-label="Message actions">
-                        <button type="button" className="message-action" onClick={() => void copyMessage(message.text)} title={copy.copy}>
+	                        <button
+	                          type="button"
+	                          className="message-action"
+	                          onClick={() => void copyMessage(message.text)}
+	                          data-tooltip={copy.copy}
+	                          title={copy.copy}
+	                          aria-label={copy.copy}
+	                        >
                           <Clipboard size={17} />
                         </button>
-                        <button type="button" className="message-action" title="Like">
-                          <ThumbsUp size={17} />
-                        </button>
-                        <button type="button" className="message-action" title="Dislike">
-                          <ThumbsDown size={17} />
-                        </button>
-                        <button type="button" className="message-action" title="Regenerate">
-                          <RotateCcw size={17} />
-                        </button>
-                        <button type="button" className="message-action" title="More">
-                          <Ellipsis size={17} />
-                        </button>
+	                        <button
+	                          type="button"
+	                          className="message-action"
+	                          onClick={() => downloadMessageAsWord(message)}
+	                          data-tooltip={copy.downloadResponse}
+	                          title={copy.downloadResponse}
+	                          aria-label={copy.downloadResponse}
+	                        >
+	                          <Download size={17} />
+	                        </button>
+	                        <button
+	                          type="button"
+	                          className="message-action"
+	                          onClick={() => void handleRegenerateMessage(message.id)}
+	                          disabled={isRunning}
+	                          data-tooltip={copy.regenerateResponse}
+	                          title={copy.regenerateResponse}
+	                          aria-label={copy.regenerateResponse}
+	                        >
+	                          <RotateCcw size={17} />
+	                        </button>
                       </div>
                     )}
                     {message.role === "assistant" && message.sources?.length ? (
                       <>
                         <div className="message-sources">
+	                          <span className="message-sources-label">{copy.references}</span>
                           {message.sources.map((source, index) => (
                             <button
                               type="button"
-                              key={`${source.documentName}-${source.chunkIndex}-${index}`}
+                              key={`${source.sourceLabel ?? index}-${source.documentName}-${source.chunkIndex}`}
                               onClick={() => setSourcePreview({ messageId: message.id, index, source })}
                               className={
                                 sourcePreview?.messageId === message.id && sourcePreview.index === index
@@ -1615,7 +2307,7 @@ export function App() {
                                   : undefined
                               }
                             >
-                              [{index + 1}] {source.documentName}
+	                              {formatMessageSourceLabel(source, index, locale)}
                             </button>
                           ))}
                         </div>
@@ -1625,8 +2317,7 @@ export function App() {
                               <div>
                                 <strong>{copy.sourcePreview}</strong>
                                 <span>
-                                  [{sourcePreview.index + 1}] {sourcePreview.source.documentName} #
-                                  {sourcePreview.source.chunkIndex + 1}
+                                  {formatMessageSourceLabel(sourcePreview.source, sourcePreview.index, locale)}
                                 </span>
                               </div>
                               <button
@@ -1682,11 +2373,23 @@ export function App() {
             />
             <div className="composer-toolbar">
               <div className="tool-group">
-                <div className="skill-control">
-                  <button className="tool-icon-button" type="button" title={copy.moreSkills} aria-label={copy.moreSkills}>
+                <div className="skill-control" data-popover-root>
+                  <button
+                    className="tool-icon-button"
+                    type="button"
+                    onClick={() => togglePopover("skills")}
+                    title={copy.moreSkills}
+                    aria-label={copy.moreSkills}
+                    aria-expanded={openPopover === "skills"}
+                    aria-haspopup="dialog"
+                  >
                     <Plus size={21} />
                   </button>
-                  <div className="skill-popover" role="dialog" aria-label={copy.moreSkills}>
+                  <div
+                    className={`skill-popover ${openPopover === "skills" ? "open" : ""}`}
+                    role="dialog"
+                    aria-label={copy.moreSkills}
+                  >
                     <button type="button" onClick={() => void handleTextAction("summarize")}>
                       <FileText size={16} />
                       <span>{copy.summarizeText}</span>
@@ -1706,18 +2409,25 @@ export function App() {
                   </div>
                 </div>
                 <span className="divider" />
-                <div className="page-control">
+                <div className="page-control" data-popover-root>
                   <button
                     className="tool-chip page-chip"
                     type="button"
+                    onClick={() => togglePopover("page")}
                     title={copy.webPage}
                     aria-label={copy.webPage}
+                    aria-expanded={openPopover === "page"}
+                    aria-haspopup="dialog"
                     disabled={isRunning || isReadingPage}
                   >
                     {isReadingPage ? <LoaderCircle size={18} className="spin" /> : <Globe2 size={18} />}
                     <span>{copy.webPage}</span>
                   </button>
-                  <div className="page-popover" role="dialog" aria-label={copy.webPage}>
+                  <div
+                    className={`page-popover ${openPopover === "page" ? "open" : ""}`}
+                    role="dialog"
+                    aria-label={copy.webPage}
+                  >
                     <button type="button" onClick={() => void handleWebPageAction("summary")}>
                       {copy.summarizePage}
                     </button>
@@ -1736,18 +2446,24 @@ export function App() {
                     </button>
                   </div>
                 </div>
-                <div className="knowledge-control">
+                <div className="knowledge-control" data-popover-root>
                   <button
                     className="tool-chip knowledge-chip"
                     type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    title={copy.importKnowledge}
-                    aria-label={copy.importKnowledge}
+                    onClick={() => togglePopover("knowledge")}
+                    title={copy.knowledgeFiles}
+                    aria-label={copy.knowledgeFiles}
+                    aria-expanded={openPopover === "knowledge"}
+                    aria-haspopup="dialog"
                   >
                     <Database size={18} />
                     <span>{copy.knowledge}{knowledgeCount ? ` ${knowledgeCount}` : ""}</span>
                   </button>
-                  <div className="knowledge-popover" role="dialog" aria-label={copy.knowledgeFiles}>
+                  <div
+                    className={`knowledge-popover ${openPopover === "knowledge" ? "open" : ""}`}
+                    role="dialog"
+                    aria-label={copy.knowledgeFiles}
+                  >
                     <div className="knowledge-popover-header">
                       <div>
                         <strong>{copy.knowledgeFiles}</strong>
@@ -1775,7 +2491,7 @@ export function App() {
                       >
                         {knowledgeSpaces.map((space) => (
                           <option value={space.id} key={space.id}>
-                            {space.name}
+                            {formatKnowledgeSpaceName(space, locale)}
                           </option>
                         ))}
                       </select>
@@ -1852,17 +2568,24 @@ export function App() {
                     </div>
                   </div>
                 </div>
-                <div className="memory-control">
+                <div className="memory-control" data-popover-root>
                   <button
                     className="tool-chip memory-chip"
                     type="button"
+                    onClick={() => togglePopover("memory")}
                     title={copy.memories}
                     aria-label={copy.memories}
+                    aria-expanded={openPopover === "memory"}
+                    aria-haspopup="dialog"
                   >
                     <Brain size={18} />
                     <span>{copy.memories}{assistantMemories.length ? ` ${assistantMemories.length}` : ""}</span>
                   </button>
-                  <div className="memory-popover" role="dialog" aria-label={copy.memories}>
+                  <div
+                    className={`memory-popover ${openPopover === "memory" ? "open" : ""}`}
+                    role="dialog"
+                    aria-label={copy.memories}
+                  >
                     <div className="memory-popover-header">
                       <div>
                         <strong>{copy.memories}</strong>
@@ -1992,6 +2715,13 @@ export function App() {
             multiple
             onChange={(event) => void handleKnowledgeImport(event.target.files)}
           />
+          <input
+            ref={dataImportInputRef}
+            className="sr-only"
+            type="file"
+            accept=".json,application/json"
+            onChange={(event) => void handleDataImport(event.target.files)}
+          />
           {error && <div className="sr-only">{error}</div>}
           {toast && <div className="toast" role="status">{toast}</div>}
         </section>
@@ -2099,6 +2829,7 @@ function formatTaskKind(kind: StoredTaskState["kind"], locale: Locale) {
 
 function formatTextActionUserMessage(task: TextAction, text: string, locale: Locale) {
   const copy = translations[locale];
+  const separator = locale === "zh" ? "：" : ": ";
   if (task === "translate") {
     const direction = detectTranslationDirection(text, locale);
     const label =
@@ -2109,12 +2840,12 @@ function formatTextActionUserMessage(task: TextAction, text: string, locale: Loc
         : direction === "zh-to-en"
           ? "Translate to English"
           : "Translate to Chinese";
-    return `${label}：${text}`;
+    return `${label}${separator}${text}`;
   }
 
   if (task === "rewrite") {
     const label = locale === "zh" ? "润色改写为更清晰自然的表达" : "Polish for clearer, more natural wording";
-    return `${label}：${text}`;
+    return `${label}${separator}${text}`;
   }
 
   const labels: Record<Exclude<TextAction, "translate" | "rewrite">, string> = {
@@ -2122,7 +2853,7 @@ function formatTextActionUserMessage(task: TextAction, text: string, locale: Loc
     write: copy.writeText,
   };
 
-  return `${labels[task]}：${text}`;
+  return `${labels[task]}${separator}${text}`;
 }
 
 function detectTranslationDirection(text: string, locale: Locale): "zh-to-en" | "en-to-zh" {
@@ -2146,8 +2877,8 @@ async function executeMemoryCommand(command: AssistantMemoryCommand, locale: Loc
   if (command.type === "remember") {
     const memory = await saveAssistantMemory(command.content);
     return locale === "zh"
-      ? `${copy.memorySaved}：${memory.content}\n\n类型：${formatMemoryType(memory.type, locale)}`
-      : `${copy.memorySaved}: ${memory.content}\n\nType: ${formatMemoryType(memory.type, locale)}`;
+      ? `${copy.memorySaved}：${memory.content}`
+      : `${copy.memorySaved}: ${memory.content}`;
   }
 
   const deletedMemories = await deleteAssistantMemoriesByQuery(command.query);
@@ -2172,19 +2903,206 @@ function formatMemoryType(type: "preference" | "fact" | "project" | "task", loca
   return labels[type][locale];
 }
 
-async function fetchActivePageText(): Promise<WebPageSnapshot> {
+async function resolveAssistantMemories(input: string, locale: Locale) {
+  const matchedMemories = await searchAssistantMemories(input, 5);
+  if (!shouldExpandMemorySearch(input, locale)) {
+    return {
+      promptMemories: matchedMemories,
+      sourceMemories: matchedMemories,
+    };
+  }
+
+  const profileMemories = (await listAssistantMemories())
+    .filter((memory) => memory.type === "fact" || memory.type === "preference" || memory.type === "project")
+    .slice(0, 5);
+  const mergedMemories = new Map<string, AssistantMemory>();
+
+  for (const memory of [...matchedMemories, ...profileMemories]) {
+    mergedMemories.set(memory.id, memory);
+  }
+
+  const promptMemories = [...mergedMemories.values()].slice(0, 5);
+
+  return {
+    promptMemories,
+    sourceMemories: matchedMemories.length ? matchedMemories : profileMemories.slice(0, 3),
+  };
+}
+
+async function resolveKnowledgeSources(input: string, locale: Locale, spaceId: string) {
+  const [builtinSources, userSources] = await Promise.all([
+    Promise.resolve(searchBuiltinKnowledge(input, locale)),
+    searchKnowledge(input, 5, spaceId),
+  ]);
+
+  return [...builtinSources, ...userSources].slice(0, 5);
+}
+
+function createMessageSources(
+  sources: KnowledgeMatch[],
+  memories: AssistantMemory[],
+  contextPlan: ContextPlan,
+  locale: Locale,
+): NonNullable<ChatMessage["sources"]> {
+  return [
+    ...(
+      contextPlan.visibleSources.includes("knowledge")
+        ? sources.map((source, index) => ({
+            sourceType: "knowledge" as const,
+            sourceLabel: `[${index + 1}]`,
+            documentName: source.documentName,
+            chunkIndex: source.chunkIndex,
+            text: source.text,
+          }))
+        : []
+    ),
+    ...(
+      contextPlan.visibleSources.includes("memory")
+        ? memories.map((memory, index) => ({
+            sourceType: "memory" as const,
+            sourceLabel: `[M${index + 1}]`,
+            documentName: translations[locale].memories,
+            chunkIndex: index,
+            text: memory.content,
+          }))
+        : []
+    ),
+  ];
+}
+
+function formatMessageSourceLabel(source: MessageSource, fallbackIndex: number, locale: Locale) {
+  const label = source.sourceLabel ?? `[${fallbackIndex + 1}]`;
+
+  if (source.sourceType === "memory") {
+    return `${label} ${translations[locale].memories}`;
+  }
+
+  return `${label} ${source.documentName} · ${translations[locale].sourceChunk} ${source.chunkIndex + 1}`;
+}
+
+function stripGeneratedSourceSection(text: string) {
+  const normalized = text.replace(/\r\n/g, "\n").trimEnd();
+  const lines = normalized.split("\n");
+  const sourceHeadingPattern = /^\s{0,3}(?:#{1,6}\s*)?(?:\*\*)?\s*(?:引用来源|参考来源|本地知识库来源|知识库来源|来源|Sources|References|Local knowledge sources?)\s*[:：]?\s*(?:\*\*)?\s*(?:（无）|\(none\)|none|无)?\s*$/i;
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line) {
+      continue;
+    }
+
+    if (sourceHeadingPattern.test(line)) {
+      return lines.slice(0, index).join("\n").trimEnd();
+    }
+  }
+
+  return normalized;
+}
+
+function formatContextAwareAnswer(
+  text: string,
+  contextPlan: ContextPlan,
+  sources: NonNullable<ChatMessage["sources"]>,
+  locale: Locale,
+) {
+  const usesVisibleMemory = sources.some((source) => source.sourceType === "memory");
+  const usesVisibleKnowledge = sources.some((source) => source.sourceType === "knowledge");
+  const naturalText = usesVisibleMemory ? normalizeMemoryAnswerTone(text, usesVisibleKnowledge, locale) : text;
+
+  if (!usesVisibleMemory || !contextPlan.shouldCompareWithGeneralKnowledge) {
+    return naturalText;
+  }
+
+  const hasSavedContentExplanation = locale === "zh"
+    ? /根据你(?:之前)?保存的内容|按你保存的内容|你保存的内容|你的记忆|长期记忆/.test(naturalText)
+    : /\bbased on (?:your )?saved content\b|\byou saved\b|\byour memory\b|\blong-term memory\b/i.test(naturalText);
+
+  if (hasSavedContentExplanation) {
+    return naturalText;
+  }
+
+  const note = locale === "zh"
+    ? "这是根据你保存的内容回答的。"
+    : "This is based on your saved content.";
+
+  return `${naturalText.trimEnd()}\n\n${note}`;
+}
+
+function normalizeMemoryAnswerTone(text: string, hasKnowledgeSources: boolean, locale: Locale) {
+  let normalized = text.trimEnd();
+
+  if (!hasKnowledgeSources) {
+    normalized = normalized.replace(/\s*(?:\[[0-9]+\]\s*)+$/g, "");
+  }
+
+  if (locale === "zh") {
+    return normalizeChineseMemoryPerspective(normalized);
+  }
+
+  return normalized
+    .replace(/\bthe user's\b/gi, "your")
+    .replace(/\bthe user owns\b/gi, "you own")
+    .replace(/\bbased on the user's\b/gi, "based on your");
+}
+
+function normalizeChineseMemoryPerspective(text: string) {
+  const cjkFollowingFirstPerson = /我(?=[\u3400-\u9fff])/g;
+
+  return text
+    .replace(/根据用户/g, "根据你")
+    .replace(/用户的/g, "你的")
+    .replace(/用户/g, "你")
+    .replace(/我的/g, "你的")
+    .replace(cjkFollowingFirstPerson, "你");
+}
+
+function createNoLocalEntityAnswer(
+  contextPlan: ContextPlan,
+  sources: NonNullable<ChatMessage["sources"]>,
+  locale: Locale,
+) {
+  if (!contextPlan.requiresLocalEvidence || sources.length) {
+    return undefined;
+  }
+
+  const target = contextPlan.targetEntity?.trim();
+  if (!target) {
+    return locale === "zh"
+      ? "我目前没有保存相关信息。"
+      : "I do not currently have saved information about that.";
+  }
+
+  return locale === "zh"
+    ? `我目前没有保存关于“${target}”的信息。`
+    : `I do not currently have saved information about "${target}".`;
+}
+
+function formatKnowledgeSpaceName(space: KnowledgeSpace, locale: Locale) {
+  if (space.id === "default" && space.name === "个人资料") {
+    return locale === "zh" ? "个人资料" : "Personal profile";
+  }
+
+  return space.name;
+}
+
+async function fetchActivePageText(locale: Locale): Promise<WebPageSnapshot> {
   const runtime = getChromeExtensionApi()?.runtime;
   if (!runtime?.id || !runtime.sendMessage) {
-    throw new Error("Chrome extension runtime is unavailable.");
+    throw new Error(
+      locale === "zh"
+        ? "当前 Chrome 扩展运行时不可用。"
+        : "Chrome extension runtime is unavailable.",
+    );
   }
 
   const response = await runtime.sendMessage({
     target: "background",
     type: "GET_ACTIVE_PAGE_TEXT",
+    locale,
   });
 
   if (!response?.ok || !response.page?.text) {
-    throw new Error(response?.error ?? "Failed to read current page.");
+    throw new Error(response?.error ?? (locale === "zh" ? "无法读取当前网页。" : "Failed to read current page."));
   }
 
   return {
@@ -2195,10 +3113,18 @@ async function fetchActivePageText(): Promise<WebPageSnapshot> {
   };
 }
 
-function createWebPageKnowledgeFile(page: WebPageSnapshot) {
-  const title = page.title || page.url || "Untitled page";
+function createWebPageKnowledgeFile(page: WebPageSnapshot, locale: Locale) {
+  const title = page.title || page.url || (locale === "zh" ? "未命名网页" : "Untitled page");
   const capturedAt = new Date(page.extractedAt ?? Date.now()).toISOString();
-  const markdown = `# ${title}
+  const markdown = locale === "zh"
+    ? `# ${title}
+
+来源地址：${page.url}
+捕获时间：${capturedAt}
+
+${page.text}
+`
+    : `# ${title}
 
 Source URL: ${page.url}
 Captured at: ${capturedAt}
@@ -2223,8 +3149,163 @@ function sanitizeFileName(name: string) {
   return sanitized || "web-page";
 }
 
+function createWordDocumentHtml(markdown: string, question: string | undefined, locale: Locale) {
+  const title = question?.trim() || (locale === "zh" ? "localAI 回答" : "localAI response");
+  const body = markdownToWordHtml(markdown);
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${escapeHtml(title)}</title>
+  <style>
+    body {
+      color: #111111;
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      font-size: 12pt;
+      line-height: 1.65;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin: 18pt 0 8pt;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+    p {
+      margin: 0 0 10pt;
+    }
+    ul, ol {
+      margin: 0 0 10pt 20pt;
+      padding: 0;
+    }
+    li {
+      margin: 3pt 0;
+    }
+    code {
+      font-family: Consolas, "Courier New", monospace;
+      background: #f2f2f2;
+    }
+    pre {
+      margin: 0 0 10pt;
+      padding: 8pt;
+      background: #f2f2f2;
+      white-space: pre-wrap;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 0 0 10pt;
+    }
+    th, td {
+      border: 1px solid #d9d9d9;
+      padding: 6pt;
+      text-align: left;
+      vertical-align: top;
+    }
+  </style>
+</head>
+<body>
+  <h1>${escapeHtml(title)}</h1>
+  ${body}
+</body>
+</html>`;
+}
+
+function markdownToWordHtml(markdown: string) {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const output: string[] = [];
+  let listType: "ul" | "ol" | undefined;
+  let codeLines: string[] | undefined;
+
+  const closeList = () => {
+    if (listType) {
+      output.push(`</${listType}>`);
+      listType = undefined;
+    }
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```")) {
+      if (codeLines) {
+        output.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        codeLines = undefined;
+      } else {
+        closeList();
+        codeLines = [];
+      }
+      continue;
+    }
+
+    if (codeLines) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!trimmed) {
+      closeList();
+      continue;
+    }
+
+    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(trimmed);
+    if (headingMatch) {
+      closeList();
+      const level = headingMatch[1].length;
+      output.push(`<h${level}>${formatInlineMarkdown(headingMatch[2])}</h${level}>`);
+      continue;
+    }
+
+    const unorderedMatch = /^[-*]\s+(.+)$/.exec(trimmed);
+    if (unorderedMatch) {
+      if (listType !== "ul") {
+        closeList();
+        output.push("<ul>");
+        listType = "ul";
+      }
+      output.push(`<li>${formatInlineMarkdown(unorderedMatch[1])}</li>`);
+      continue;
+    }
+
+    const orderedMatch = /^\d+[.)]\s+(.+)$/.exec(trimmed);
+    if (orderedMatch) {
+      if (listType !== "ol") {
+        closeList();
+        output.push("<ol>");
+        listType = "ol";
+      }
+      output.push(`<li>${formatInlineMarkdown(orderedMatch[1])}</li>`);
+      continue;
+    }
+
+    closeList();
+    output.push(`<p>${formatInlineMarkdown(trimmed)}</p>`);
+  }
+
+  if (codeLines) {
+    output.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  }
+  closeList();
+
+  return output.join("\n");
+}
+
+function formatInlineMarkdown(text: string) {
+  return escapeHtml(text)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function escapeHtml(text: string) {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function formatWebPageUserMessage(action: WebPageAction, page: WebPageSnapshot, question: string, locale: Locale) {
   const title = page.title || page.url;
+  const separator = locale === "zh" ? "：" : ": ";
   const labels: Record<WebPageAction, Record<Locale, string>> = {
     summary: { zh: "总结当前网页", en: "Summarize current page" },
     qa: { zh: "基于当前网页回答", en: "Answer from current page" },
@@ -2233,12 +3314,10 @@ function formatWebPageUserMessage(action: WebPageAction, page: WebPageSnapshot, 
   };
 
   if (action === "qa" && question) {
-    return locale === "zh"
-      ? `${labels.qa.zh}：${question}\n${title}`
-      : `${labels.qa.en}: ${question}\n${title}`;
+    return `${labels.qa[locale]}${separator}${question}\n${title}`;
   }
 
-  return `${labels[action][locale]}：${title}`;
+  return `${labels[action][locale]}${separator}${title}`;
 }
 
 function buildWebPagePrompt(action: WebPageAction, page: WebPageSnapshot, question: string, locale: Locale) {
@@ -2285,7 +3364,7 @@ ${pageBlock}`;
 async function submitBackgroundTask(
   conversation: StoredConversation,
   text: string,
-  sources: KnowledgeMatch[],
+  sources: NonNullable<ChatMessage["sources"]>,
   task: AiTask = "prompt",
 ) {
   const runtime = (

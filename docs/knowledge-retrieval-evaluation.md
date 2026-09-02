@@ -38,7 +38,7 @@ npm run build
 
 2. 在 Chrome 扩展页加载 `dist/`。
 3. 打开 localAI。
-4. 在“浏览器知识”中选择目标知识空间，例如默认的“个人资料”。
+4. 在“知识库”中选择目标知识空间，例如默认的“个人资料”。
 5. 导入 `examples/localai-knowledge-demo.md`。
 6. 打开 `examples/knowledge-retrieval-eval.json`，逐条复制 `cases[].query` 提问。
 7. 检查回答底部引用来源：

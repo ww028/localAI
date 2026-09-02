@@ -1,6 +1,7 @@
 import type { Locale } from "./chromeAi";
 import type { AssistantMemory } from "./assistantMemoryStore";
 import type { DeterministicExecution } from "./assistantDeterministicExecutor";
+import type { ContextPlan } from "./assistantContextPlan";
 import type { AssistantIntent } from "./assistantIntent";
 import type { AssistantPlan } from "./assistantPlanner";
 import type { StoredChatMessage } from "./conversationStore";
@@ -12,6 +13,7 @@ type BuildAssistantPromptInput = {
   intent?: AssistantIntent;
   plan?: AssistantPlan;
   deterministicExecution?: DeterministicExecution;
+  contextPlan: ContextPlan;
   sources: KnowledgeMatch[];
   memories: AssistantMemory[];
   recentMessages: StoredChatMessage[];
@@ -26,23 +28,24 @@ export function buildAssistantPrompt({
   intent,
   plan,
   deterministicExecution,
+  contextPlan,
   sources,
   memories,
   recentMessages,
 }: BuildAssistantPromptInput) {
   const intentContext = buildIntentContext(intent, locale);
   const planContext = buildPlanContext(plan, locale);
+  const contextPlanText = buildContextPlanContext(contextPlan, locale);
   const deterministicContext = buildDeterministicExecutionContext(deterministicExecution, locale);
   const conversationContext = buildConversationContext(recentMessages, locale);
-  const memoryContext = buildMemoryContext(memories, locale);
-  const knowledgeContext = buildKnowledgeContext(sources, locale);
+  const memoryContext = buildMemoryContext(memories, contextPlan, locale);
+  const knowledgeContext = buildKnowledgeContext(sources, contextPlan, locale);
 
   if (locale === "zh") {
     return `你是 localAI，一个运行在 Chrome 浏览器内的本地优先个人助手。
 
 工作原则：
-- 先判断用户意图，再组织回答。
-- 涉及本地知识库时，优先依据“本地知识库片段”回答，并在相关结论后标注引用编号，如 [1]。
+- 严格遵循“上下文使用策略”，先判断用户意图，再组织回答。
 - 如果资料不足，明确说明缺少的信息，不要编造。
 - 如果问题需要计算、列表整理或步骤规划，先给出结构化结果，再补充必要说明。
 - 保持回答简洁、可执行，默认使用中文和 Markdown。
@@ -50,6 +53,8 @@ export function buildAssistantPrompt({
 ${intentContext}
 
 ${planContext}
+
+${contextPlanText}
 
 ${deterministicContext}
 
@@ -66,8 +71,7 @@ ${question}`;
   return `You are localAI, a local-first personal assistant running inside Chrome.
 
 Operating rules:
-- Identify the user's intent before forming the answer.
-- When local knowledge snippets are present, answer from them first and cite relevant claims with source numbers like [1].
+- Strictly follow the Context Usage Plan. Identify the user's intent before forming the answer.
 - If the available material is insufficient, say what is missing instead of inventing facts.
 - If the task requires calculation, organization, or planning, produce structured results before any extra explanation.
 - Keep the answer concise, actionable, and in Markdown.
@@ -75,6 +79,8 @@ Operating rules:
 ${intentContext}
 
 ${planContext}
+
+${contextPlanText}
 
 ${deterministicContext}
 
@@ -86,6 +92,24 @@ ${knowledgeContext}
 
 User question:
 ${question}`;
+}
+
+function buildContextPlanContext(contextPlan: ContextPlan, locale: Locale) {
+  const serialized = JSON.stringify({
+    subject: contextPlan.subject,
+    targetEntity: contextPlan.targetEntity,
+    memoryMode: contextPlan.memoryMode,
+    knowledgeMode: contextPlan.knowledgeMode,
+    requiresLocalEvidence: contextPlan.requiresLocalEvidence,
+    visibleSources: contextPlan.visibleSources,
+    shouldCompareWithGeneralKnowledge: contextPlan.shouldCompareWithGeneralKnowledge,
+    responseConstraints: contextPlan.responseConstraints,
+    rationale: contextPlan.rationale,
+  }, null, 2);
+
+  return locale === "zh"
+    ? `上下文使用策略：\n\`\`\`json\n${serialized}\n\`\`\`\n必须遵守 responseConstraints；当 responseConstraints 与模型通识冲突时，以 responseConstraints 和本地上下文为准。`
+    : `Context Usage Plan:\n\`\`\`json\n${serialized}\n\`\`\`\nYou must follow responseConstraints. If they conflict with model general knowledge, responseConstraints and local context win.`;
 }
 
 function buildIntentContext(intent: AssistantIntent | undefined, locale: Locale) {
@@ -144,29 +168,18 @@ function buildDeterministicExecutionContext(execution: DeterministicExecution | 
     : `Deterministic execution result:\n${execution.resultText ?? execution.error ?? ""}\n\n\`\`\`json\n${serialized}\n\`\`\`\nUse this deterministic result first. Do not recalculate, re-sort, or reconvert it.`;
 }
 
-function buildMemoryContext(memories: AssistantMemory[], locale: Locale) {
-  if (!memories.length) {
+function buildMemoryContext(memories: AssistantMemory[], contextPlan: ContextPlan, locale: Locale) {
+  if (!memories.length || contextPlan.memoryMode === "none") {
     return locale === "zh" ? "个人记忆：无" : "Personal memories: none";
   }
 
   const memoryText = memories
-    .map((memory, index) => `[M${index + 1}] ${formatMemoryType(memory.type, locale)}: ${memory.content}`)
+    .map((memory) => `- ${locale === "zh" ? "用户原话记忆" : "user-authored memory"}: ${memory.content}`)
     .join("\n");
 
   return locale === "zh"
-    ? `个人记忆：\n${memoryText}`
-    : `Personal memories:\n${memoryText}`;
-}
-
-function formatMemoryType(type: AssistantMemory["type"], locale: Locale) {
-  const labels: Record<AssistantMemory["type"], Record<Locale, string>> = {
-    preference: { zh: "用户偏好", en: "preference" },
-    fact: { zh: "长期事实", en: "fact" },
-    project: { zh: "项目约定", en: "project" },
-    task: { zh: "任务状态", en: "task" },
-  };
-
-  return labels[type][locale];
+    ? `用户保存的长期记忆（内容中的第一人称均指用户，回答时必须改写成面向用户的自然二人称，不要照抄原句）：\n${memoryText}`
+    : `User-saved long-term memories (first-person wording refers to the user):\n${memoryText}`;
 }
 
 function buildConversationContext(messages: StoredChatMessage[], locale: Locale) {
@@ -185,8 +198,8 @@ function buildConversationContext(messages: StoredChatMessage[], locale: Locale)
     : `Recent conversation context:\n${context}`;
 }
 
-function buildKnowledgeContext(sources: KnowledgeMatch[], locale: Locale) {
-  if (!sources.length) {
+function buildKnowledgeContext(sources: KnowledgeMatch[], contextPlan: ContextPlan, locale: Locale) {
+  if (!sources.length || contextPlan.knowledgeMode === "none") {
     return locale === "zh" ? "本地知识库片段：无" : "Local knowledge snippets: none";
   }
 
