@@ -88,6 +88,49 @@ test("createContextPlan includes structured memory deletion targets", async () =
   assert.deepEqual(implicitContextPlan.memoryOperation.targets, ["张三", "李四"]);
 });
 
+test("createContextPlan handles compact remember commands", async () => {
+  const { createContextPlan } = await modulePromise;
+  const contextPlan = createContextPlan({
+    question: "记住张三是一条狗",
+    locale: "zh",
+    intent: {
+      type: "memory_operation",
+      confidence: 0.9,
+      executionMode: "deterministic",
+      requiredTools: ["memory-planner", "memory-store"],
+      entities: {},
+      rationale: "用户要求新增、删除或修改个人记忆。",
+    },
+    sources: [],
+    memories: [],
+  });
+
+  assert.equal(contextPlan.memoryOperation.action, "remember");
+  assert.equal(contextPlan.memoryOperation.content, "张三是一条狗");
+});
+
+test("createContextPlan treats casual entity questions as local entity profile queries", async () => {
+  const { createContextPlan } = await modulePromise;
+  const contextPlan = createContextPlan({
+    question: "张三是啥",
+    locale: "zh",
+    intent: {
+      type: "chat",
+      confidence: 0.5,
+      executionMode: "answer",
+      requiredTools: ["language-model"],
+      entities: {},
+      rationale: "普通对话。",
+    },
+    sources: [],
+    memories: [],
+  });
+
+  assert.equal(contextPlan.subject, "entity_profile_query");
+  assert.equal(contextPlan.targetEntity, "张三");
+  assert.equal(contextPlan.requiresLocalEvidence, true);
+});
+
 test("createContextPlan accepts model-planned memory operations", async () => {
   const { createContextPlan } = await modulePromise;
   const modelPlannedOperation = {

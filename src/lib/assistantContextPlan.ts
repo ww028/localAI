@@ -104,6 +104,7 @@ export function createMemoryOperationPlan(question: string, locale: Locale, inte
   const text = question.trim();
   const rememberContent = matchFirst(text, [
     /^(?:请)?(?:帮我)?记住[:：\s]*(.+)$/i,
+    /^(?:请)?(?:帮我)?记住(.+)$/i,
     /^(?:你要记住|记一下)[:：\s]*(.+)$/i,
     /^remember(?: that)?[:\s]+(.+)$/i,
     /^please remember(?: that)?[:\s]+(.+)$/i,
@@ -262,7 +263,7 @@ function isUserProfileQuestion(question: string, locale: Locale) {
 function extractEntityProfileTarget(question: string, locale: Locale) {
   const patterns = locale === "zh"
     ? [
-        /^(?:请问)?(.{1,24}?)(?:是谁|是誰|是哪位|呢)[?？。!！]*$/,
+        /^(?:请问)?(.{1,24}?)(?:是谁|是誰|是哪位|是啥|是什么|呢)[?？。!！]*$/,
       ]
     : [
         /^(?:who is|who's)\s+(.{1,48}?)[?.!]*$/i,

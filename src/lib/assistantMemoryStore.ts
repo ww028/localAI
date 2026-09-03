@@ -1,9 +1,20 @@
 export type AssistantMemoryType = "preference" | "fact" | "project" | "task";
 
+export type AssistantMemoryFact = {
+  subject: string;
+  predicate: string;
+  value: string;
+  confidence: number;
+  sourceText: string;
+  normalizedText: string;
+};
+
 export type AssistantMemory = {
   id: string;
   type: AssistantMemoryType;
   content: string;
+  sourceText?: string;
+  facts?: AssistantMemoryFact[];
   keywords: string[];
   createdAt: number;
   updatedAt: number;
@@ -30,12 +41,34 @@ export type AssistantMemorySuggestion = {
 export type AssistantMemoryConflict = {
   memory: AssistantMemory;
   score: number;
-  reason: "duplicate" | "similar";
+  reason: "duplicate" | "similar" | "same_fact_key";
 };
 
 export type AssistantMemoryImportResult = {
   imported: number;
   skipped: number;
+};
+
+export type AssistantMemoryWriteDecision = {
+  action: "save_new" | "replace_existing" | "merge_with_existing" | "keep_both" | "ask_user";
+  existingMemoryId?: string;
+  content?: string;
+  memoryType?: AssistantMemoryType;
+  rationale?: string;
+};
+
+export type AssistantMemoryWriteResult = {
+  decision: "saved" | "updated" | "merged" | "kept_both" | "needs_confirmation";
+  success: boolean;
+  savedMemory?: AssistantMemory;
+  updatedMemory?: AssistantMemory;
+  previousMemory?: AssistantMemory;
+  writeDecision: AssistantMemoryWriteDecision;
+};
+
+type SaveAssistantMemoryOptions = {
+  sourceText?: string;
+  facts?: AssistantMemoryFact[];
 };
 
 const DB_NAME = "local-ai-assistant-memory";
@@ -46,6 +79,7 @@ export function parseAssistantMemoryCommand(input: string): AssistantMemoryComma
   const text = input.trim();
   const rememberMatch = matchFirst(text, [
     /^(?:请)?(?:帮我)?记住[:：\s]*(.+)$/i,
+    /^(?:请)?(?:帮我)?记住(.+)$/i,
     /^(?:你要记住|记一下)[:：\s]*(.+)$/i,
     /^remember(?: that)?[:\s]+(.+)$/i,
     /^please remember(?: that)?[:\s]+(.+)$/i,
@@ -76,13 +110,20 @@ export function parseAssistantMemoryCommand(input: string): AssistantMemoryComma
   return undefined;
 }
 
-export async function saveAssistantMemory(content: string, type = classifyMemoryType(content)) {
+export async function saveAssistantMemory(
+  content: string,
+  type = classifyMemoryType(content),
+  options: SaveAssistantMemoryOptions = {},
+) {
   const now = Date.now();
+  const facts = normalizeMemoryFacts(options.facts, content);
   const memory: AssistantMemory = {
     id: crypto.randomUUID(),
     type,
     content: content.trim(),
-    keywords: tokenize(content),
+    sourceText: options.sourceText,
+    facts,
+    keywords: tokenizeMemory(content, facts),
     createdAt: now,
     updatedAt: now,
   };
@@ -133,6 +174,273 @@ export async function findAssistantMemoryConflicts(
     .slice(0, limit);
 }
 
+export async function findAssistantMemoryFactConflicts(
+  facts: AssistantMemoryFact[],
+  limit = 5,
+): Promise<AssistantMemoryConflict[]> {
+  const factKeys = new Set(facts.map(getAssistantMemoryFactKey).filter(Boolean));
+  if (!factKeys.size) {
+    return [];
+  }
+
+  return (await listAssistantMemories())
+    .map((memory) => {
+      const matchedKeys = memory.facts?.map(getAssistantMemoryFactKey).filter((key) => key && factKeys.has(key)) ?? [];
+      return {
+        memory,
+        score: matchedKeys.length,
+        reason: "same_fact_key" as const,
+      };
+    })
+    .filter((conflict) => conflict.score > 0)
+    .sort((left, right) => right.score - left.score || right.memory.updatedAt - left.memory.updatedAt)
+    .slice(0, limit);
+}
+
+export function getAssistantMemoryFactKey(fact: Pick<AssistantMemoryFact, "subject" | "predicate">) {
+  const subject = normalizeMemoryFactKeyPart(fact.subject);
+  const predicate = normalizeAssistantMemoryFactPredicate(fact.predicate);
+  return subject && predicate ? `${subject}:${predicate}` : "";
+}
+
+export function hasSameAssistantMemoryFactSlot(left: AssistantMemoryFact[], right: AssistantMemoryFact[]) {
+  const leftKeys = new Set(left.map(getAssistantMemoryFactKey).filter(Boolean));
+  return right.some((fact) => leftKeys.has(getAssistantMemoryFactKey(fact)));
+}
+
+export function createAssistantMemoryWriteDecision({
+  content,
+  facts,
+  memoryType,
+  relatedMemories,
+  modelDecision,
+}: {
+  content: string;
+  facts: AssistantMemoryFact[];
+  memoryType: AssistantMemoryType;
+  relatedMemories: AssistantMemory[];
+  modelDecision?: AssistantMemoryWriteDecision;
+}): AssistantMemoryWriteDecision {
+  const sameSlotMemories = relatedMemories.filter((memory) => memory.facts && hasSameAssistantMemoryFactSlot(facts, memory.facts));
+  const fallbackDecision = createFallbackAssistantMemoryWriteDecision(content, facts, memoryType, sameSlotMemories);
+  const decision = modelDecision ? normalizeAssistantMemoryWriteDecision(modelDecision, relatedMemories, fallbackDecision) : fallbackDecision;
+
+  if (!sameSlotMemories.length) {
+    return decision;
+  }
+
+  if (sameSlotMemories.length > 1) {
+    return {
+      action: "ask_user",
+      content,
+      memoryType,
+      rationale: "Multiple existing memories share the same fact slot.",
+    };
+  }
+
+  const existingMemory = sameSlotMemories[0];
+  if (decision.action === "merge_with_existing" && decision.existingMemoryId === existingMemory.id) {
+    return decision;
+  }
+
+  return {
+    action: "replace_existing",
+    existingMemoryId: existingMemory.id,
+    content: decision.content || formatAssistantMemoryFactsAsContent(facts) || content,
+    memoryType: decision.memoryType ?? memoryType,
+    rationale: decision.rationale || "An existing memory uses the same subject and predicate, so the newer fact replaces it.",
+  };
+}
+
+export async function writeAssistantMemoryWithDecision({
+  content,
+  facts,
+  memoryType,
+  sourceText,
+  relatedMemories,
+  modelDecision,
+}: {
+  content: string;
+  facts: AssistantMemoryFact[];
+  memoryType: AssistantMemoryType;
+  sourceText?: string;
+  relatedMemories: AssistantMemory[];
+  modelDecision?: AssistantMemoryWriteDecision;
+}): Promise<AssistantMemoryWriteResult> {
+  const writeDecision = createAssistantMemoryWriteDecision({
+    content,
+    facts,
+    memoryType,
+    relatedMemories,
+    modelDecision,
+  });
+
+  if (writeDecision.action === "ask_user") {
+    return { decision: "needs_confirmation", success: false, writeDecision };
+  }
+
+  if (writeDecision.action === "replace_existing" || writeDecision.action === "merge_with_existing") {
+    const targetMemory = relatedMemories.find((memory) => memory.id === writeDecision.existingMemoryId);
+    if (targetMemory) {
+      const nextFacts = mergeAssistantMemoryFacts(targetMemory.facts ?? [], facts);
+      const nextContent = writeDecision.content?.trim() ||
+        formatAssistantMemoryFactsAsContent(nextFacts) ||
+        formatAssistantMemoryFactsAsContent(facts) ||
+        content;
+      const updatedMemory = await updateAssistantMemory(targetMemory.id, {
+        content: nextContent,
+        type: writeDecision.memoryType ?? memoryType,
+        sourceText: sourceText ?? content,
+        facts: nextFacts.length ? nextFacts : facts,
+      });
+
+      return {
+        decision: writeDecision.action === "merge_with_existing" ? "merged" : "updated",
+        success: true,
+        updatedMemory,
+        previousMemory: targetMemory,
+        writeDecision,
+      };
+    }
+  }
+
+  const savedContent = writeDecision.content?.trim() || formatAssistantMemoryFactsAsContent(facts) || content;
+  const savedMemory = await saveAssistantMemory(savedContent, writeDecision.memoryType ?? memoryType, {
+    sourceText: sourceText ?? content,
+    facts,
+  });
+
+  return {
+    decision: writeDecision.action === "keep_both" ? "kept_both" : "saved",
+    success: true,
+    savedMemory,
+    writeDecision,
+  };
+}
+
+export function normalizeAssistantMemoryWriteDecision(
+  decision: AssistantMemoryWriteDecision,
+  relatedMemories: AssistantMemory[],
+  fallback: AssistantMemoryWriteDecision,
+): AssistantMemoryWriteDecision {
+  const relatedIds = new Set(relatedMemories.map((memory) => memory.id));
+  const requiresExistingId = decision.action === "replace_existing" || decision.action === "merge_with_existing";
+  const existingMemoryId = decision.existingMemoryId && relatedIds.has(decision.existingMemoryId)
+    ? decision.existingMemoryId
+    : fallback.existingMemoryId;
+
+  if (requiresExistingId && !existingMemoryId) {
+    return fallback;
+  }
+
+  return {
+    action: decision.action,
+    existingMemoryId,
+    content: decision.content?.trim() || fallback.content,
+    memoryType: decision.memoryType ?? fallback.memoryType,
+    rationale: decision.rationale?.trim() || fallback.rationale,
+  };
+}
+
+export function formatAssistantMemoryFactsAsContent(facts: AssistantMemoryFact[]) {
+  return facts.map((fact) => fact.normalizedText.trim()).filter(Boolean).join("\n");
+}
+
+export function filterSourceGroundedAssistantMemoryFacts(facts: AssistantMemoryFact[], sourceText: string) {
+  return facts.filter((fact) => isAssistantMemoryFactSourceGrounded(fact, sourceText));
+}
+
+export function isAssistantMemoryFactSourceGrounded(fact: AssistantMemoryFact, sourceText: string) {
+  return isAssistantMemoryTextGroundedInSource(fact.normalizedText, sourceText);
+}
+
+export function isAssistantMemoryTextGroundedInSource(text: string, sourceText: string) {
+  const normalizedText = normalizeMemoryEvidenceText(text);
+  const normalizedSource = normalizeMemoryEvidenceText(sourceText);
+  if (!normalizedText || !normalizedSource) {
+    return false;
+  }
+
+  return normalizedSource.includes(normalizedText) ||
+    normalizedText.includes(normalizedSource) ||
+    isSubsequence(normalizedText, normalizedSource);
+}
+
+export function mergeAssistantMemoryFacts(existingFacts: AssistantMemoryFact[], incomingFacts: AssistantMemoryFact[]) {
+  const merged = new Map<string, AssistantMemoryFact>();
+
+  for (const fact of normalizeMemoryFacts(existingFacts, "") ?? []) {
+    const key = getAssistantMemoryFactKey(fact);
+    if (key) {
+      merged.set(key, fact);
+    }
+  }
+
+  for (const fact of normalizeMemoryFacts(incomingFacts, "") ?? []) {
+    const key = getAssistantMemoryFactKey(fact);
+    if (key) {
+      merged.set(key, fact);
+    }
+  }
+
+  return [...merged.values()];
+}
+
+function createFallbackAssistantMemoryWriteDecision(
+  content: string,
+  facts: AssistantMemoryFact[],
+  memoryType: AssistantMemoryType,
+  sameSlotMemories: AssistantMemory[],
+): AssistantMemoryWriteDecision {
+  if (sameSlotMemories.length === 1) {
+    return {
+      action: "replace_existing",
+      existingMemoryId: sameSlotMemories[0].id,
+      content: formatAssistantMemoryFactsAsContent(facts) || content,
+      memoryType,
+      rationale: "Found one existing memory in the same fact slot.",
+    };
+  }
+
+  if (!sameSlotMemories.length) {
+    return {
+      action: "save_new",
+      content: formatAssistantMemoryFactsAsContent(facts) || content,
+      memoryType,
+      rationale: "No existing memory uses the same subject and predicate.",
+    };
+  }
+
+  return {
+    action: "ask_user",
+    content,
+    memoryType,
+    rationale: "Multiple existing memories share the same fact slot.",
+  };
+}
+
+export function normalizeAssistantMemoryFactPredicate(predicate: string) {
+  const normalized = normalizeMemoryFactKeyPart(predicate);
+  const aliases: Array<[string, string[]]> = [
+    ["identity", ["identity", "身份", "身份或属性", "属性", "类型", "类别", "物种", "是什么", "is"]],
+    ["preference", ["preference", "偏好", "喜好", "习惯", "倾向"]],
+    ["name", ["name", "名字", "名称", "称呼", "昵称"]],
+    ["location", ["location", "地点", "位置", "地址", "所在地", "住址"]],
+    ["project", ["project", "项目", "仓库", "代码库"]],
+    ["role", ["role", "角色", "职业", "职位", "职责"]],
+    ["status", ["status", "状态", "进度"]],
+    ["relationship", ["relationship", "关系", "关联"]],
+  ];
+
+  for (const [canonical, values] of aliases) {
+    if (values.some((value) => normalizeMemoryFactKeyPart(value) === normalized)) {
+      return canonical;
+    }
+  }
+
+  return normalized;
+}
+
 export async function importAssistantMemories(json: string): Promise<AssistantMemoryImportResult> {
   const payload = JSON.parse(json) as unknown;
   const records = parseImportedMemories(payload);
@@ -156,7 +464,9 @@ export async function importAssistantMemories(json: string): Promise<AssistantMe
         id: record.id || crypto.randomUUID(),
         type: record.type,
         content,
-        keywords: tokenize(content),
+        sourceText: record.sourceText,
+        facts: record.facts,
+        keywords: tokenizeMemory(content, record.facts),
         createdAt: normalizeTimestamp(record.createdAt, now),
         updatedAt: normalizeTimestamp(record.updatedAt, now),
       };
@@ -213,7 +523,7 @@ export async function getAssistantMemory(memoryId: string): Promise<AssistantMem
 
 export async function updateAssistantMemory(
   memoryId: string,
-  updates: Partial<Pick<AssistantMemory, "type" | "content">>,
+  updates: Partial<Pick<AssistantMemory, "type" | "content" | "sourceText" | "facts">>,
 ): Promise<AssistantMemory> {
   const currentMemory = await getAssistantMemory(memoryId);
   if (!currentMemory) {
@@ -221,11 +531,13 @@ export async function updateAssistantMemory(
   }
 
   const content = updates.content?.trim() ?? currentMemory.content;
+  const facts = updates.facts ? normalizeMemoryFacts(updates.facts, content) : currentMemory.facts;
   const memory: AssistantMemory = {
     ...currentMemory,
     ...updates,
     content,
-    keywords: tokenize(content),
+    facts,
+    keywords: tokenizeMemory(content, facts),
     updatedAt: Date.now(),
   };
   const db = await openDatabase();
@@ -422,7 +734,7 @@ export function classifyMemoryType(content: string): AssistantMemoryType {
 
 function scoreMemory(query: string, queryTerms: string[], memory: AssistantMemory) {
   const normalizedQuery = query.toLowerCase();
-  const normalizedContent = memory.content.toLowerCase();
+  const normalizedContent = getSearchableMemoryText(memory).toLowerCase();
   const memoryTerms = new Set(memory.keywords);
   const keywordScore = queryTerms.reduce((score, term) => score + (memoryTerms.has(term) ? term.length : 0), 0);
   const substringScore = normalizedContent.includes(normalizedQuery) || normalizedQuery.includes(normalizedContent) ? 20 : 0;
@@ -431,7 +743,7 @@ function scoreMemory(query: string, queryTerms: string[], memory: AssistantMemor
 }
 
 function scoreMemoryDeletionMatch(query: string, memory: Pick<AssistantMemory, "content" | "keywords">) {
-  const normalizedContent = normalizeMemoryContent(memory.content);
+  const normalizedContent = normalizeMemoryContent(getSearchableMemoryText(memory));
   if (!query || !normalizedContent) {
     return 0;
   }
@@ -449,7 +761,7 @@ function scoreMemoryDeletionMatch(query: string, memory: Pick<AssistantMemory, "
     return 0;
   }
 
-  const memoryTerms = new Set((memory.keywords?.length ? memory.keywords : tokenize(memory.content)).filter(isInformativeMemoryToken));
+  const memoryTerms = new Set((memory.keywords?.length ? memory.keywords : tokenize(getSearchableMemoryText(memory))).filter(isInformativeMemoryToken));
   const matchedTerms = queryTerms.filter((term) => memoryTerms.has(term));
   const coverage = matchedTerms.length / queryTerms.length;
   const hasSpecificLongTerm = matchedTerms.some((term) => term.length >= 3 || /^[a-z0-9_]{4,}$/i.test(term));
@@ -492,6 +804,37 @@ function expandDeletionQueries(query: string) {
 
 function normalizeMemoryContent(content: string) {
   return content.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function getSearchableMemoryText(memory: Pick<AssistantMemory, "content" | "facts">) {
+  const factText = memory.facts?.map((fact) => `${fact.subject} ${fact.predicate} ${fact.value} ${fact.normalizedText}`).join(" ") ?? "";
+  return `${memory.content} ${factText}`.trim();
+}
+
+function normalizeMemoryFactKeyPart(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, "");
+}
+
+function normalizeMemoryEvidenceText(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s"'“”‘’`.,，。:：;；!?！？、()[\]{}<>《》【】]/g, "")
+    .replace(/(?:一个|一种|一只|一条|一位|一名|的是|是|为|叫做|叫|的|the|a|an|is|are|am|be|as|called)/gi, "");
+}
+
+function isSubsequence(needle: string, haystack: string) {
+  let index = 0;
+  for (const char of haystack) {
+    if (char === needle[index]) {
+      index += 1;
+      if (index === needle.length) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function tokenizeForDeletion(text: string) {
@@ -540,6 +883,8 @@ function parseImportedMemories(payload: unknown): Array<{
   id?: string;
   type: AssistantMemoryType;
   content: string;
+  sourceText?: string;
+  facts?: AssistantMemoryFact[];
   createdAt?: number;
   updatedAt?: number;
 }> {
@@ -569,6 +914,8 @@ function parseImportedMemories(payload: unknown): Array<{
       id: typeof record.id === "string" && record.id ? record.id : undefined,
       type,
       content,
+      sourceText: typeof record.sourceText === "string" ? record.sourceText : undefined,
+      facts: normalizeMemoryFacts(record.facts, content),
       createdAt: typeof record.createdAt === "number" ? record.createdAt : undefined,
       updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : undefined,
     };
@@ -589,6 +936,56 @@ function normalizeSuggestedMemory(input: string) {
     .replace(/^[“"']|[”"']$/g, "")
     .replace(/[。.!！?？\s]+$/g, "")
     .trim();
+}
+
+function normalizeMemoryFacts(facts: unknown, fallbackSourceText: string): AssistantMemoryFact[] | undefined {
+  if (!Array.isArray(facts)) {
+    return undefined;
+  }
+
+  const normalizedFacts = facts
+    .map((fact) => normalizeMemoryFact(fact, fallbackSourceText))
+    .filter((fact): fact is AssistantMemoryFact => Boolean(fact));
+
+  return normalizedFacts.length ? normalizedFacts : undefined;
+}
+
+function normalizeMemoryFact(fact: unknown, fallbackSourceText: string): AssistantMemoryFact | undefined {
+  if (typeof fact !== "object" || fact === null) {
+    return undefined;
+  }
+
+  const record = fact as Partial<AssistantMemoryFact>;
+  const subject = typeof record.subject === "string" ? record.subject.trim() : "";
+  const predicate = typeof record.predicate === "string" ? normalizeAssistantMemoryFactPredicate(record.predicate) : "";
+  const value = typeof record.value === "string" ? record.value.trim() : "";
+  if (!subject || !predicate || !value) {
+    return undefined;
+  }
+
+  const confidence = typeof record.confidence === "number" && Number.isFinite(record.confidence)
+    ? Math.min(Math.max(record.confidence, 0), 1)
+    : 0.75;
+  const sourceText = typeof record.sourceText === "string" && record.sourceText.trim()
+    ? record.sourceText.trim()
+    : fallbackSourceText.trim();
+  const normalizedText = typeof record.normalizedText === "string" && record.normalizedText.trim()
+    ? record.normalizedText.trim()
+    : `${subject} ${predicate} ${value}`;
+
+  return {
+    subject,
+    predicate,
+    value,
+    confidence,
+    sourceText,
+    normalizedText,
+  };
+}
+
+function tokenizeMemory(content: string, facts: AssistantMemoryFact[] | undefined) {
+  const factText = facts?.map((fact) => `${fact.subject} ${fact.predicate} ${fact.value} ${fact.normalizedText}`).join(" ") ?? "";
+  return tokenize(`${content} ${factText}`);
 }
 
 function tokenize(text: string) {

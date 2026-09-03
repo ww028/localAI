@@ -70,19 +70,27 @@ import { searchBuiltinKnowledge } from "./lib/builtinKnowledge";
 import {
   type AssistantMemory,
   type AssistantMemoryConflict,
+  type AssistantMemoryFact,
   type AssistantMemorySuggestion,
   type AssistantMemoryType,
+  type AssistantMemoryWriteDecision,
   classifyMemoryType,
+  createAssistantMemoryWriteDecision,
   deleteAssistantMemory,
   deleteAssistantMemoriesByQueries,
   detectAssistantMemorySuggestion,
   exportAssistantMemories,
+  filterSourceGroundedAssistantMemoryFacts,
+  findAssistantMemoryFactConflicts,
   findAssistantMemoryConflicts,
   importAssistantMemories,
   listAssistantMemories,
+  isAssistantMemoryTextGroundedInSource,
+  normalizeAssistantMemoryWriteDecision,
   saveAssistantMemory,
   searchAssistantMemories,
   updateAssistantMemory,
+  writeAssistantMemoryWithDecision,
 } from "./lib/assistantMemoryStore";
 import {
   type KnowledgeDocument,
@@ -140,14 +148,6 @@ type MemoryOperationExecutionResult =
       deletedMemories: AssistantMemory[];
       success: boolean;
     };
-
-type RememberWriteDecision = {
-  action: "save_new" | "replace_existing" | "merge_with_existing" | "keep_both" | "ask_user";
-  existingMemoryId?: string;
-  content?: string;
-  memoryType?: AssistantMemoryType;
-  rationale?: string;
-};
 
 const translations: Record<
   Locale,
@@ -3590,47 +3590,45 @@ async function executeRememberMemoryOperation(
   locale: Locale,
 ): Promise<MemoryOperationExecutionResult> {
   const memoryType = operation.memoryType ?? classifyMemoryType(operation.content);
-  const relatedMemories = await findRelatedMemoriesForRemember(operation);
-  const decision = relatedMemories.length
-    ? await planRememberWriteDecisionWithModel(operation, relatedMemories, memoryType, locale)
-    : { action: "save_new" as const, content: operation.content, memoryType };
+  const facts = await createStructuredMemoryFacts(operation, memoryType, locale);
+  const relatedMemories = await findRelatedMemoriesForRemember(operation, facts);
+  const modelDecision = relatedMemories.length
+    ? await planRememberWriteDecisionWithModel(operation, facts, relatedMemories, memoryType, locale)
+    : undefined;
+  const writeResult = await writeAssistantMemoryWithDecision({
+    content: operation.content,
+    facts,
+    memoryType,
+    sourceText: operation.content,
+    relatedMemories,
+    modelDecision,
+  });
 
-  if (decision.action === "replace_existing" || decision.action === "merge_with_existing") {
-    const targetMemory = relatedMemories.find((memory) => memory.id === decision.existingMemoryId) ?? relatedMemories[0];
-    if (targetMemory) {
-      const nextContent = decision.action === "merge_with_existing"
-        ? mergeMemoryContent(targetMemory.content, decision.content || operation.content)
-        : decision.content || operation.content;
-      const updatedMemory = await updateAssistantMemory(targetMemory.id, {
-        content: nextContent,
-        type: decision.memoryType ?? memoryType,
-      });
-      return {
-        action: "remember",
-        updatedMemory,
-        previousMemory: targetMemory,
-        decision: decision.action === "merge_with_existing" ? "merged" : "updated",
-        success: true,
-      };
-    }
-  }
-
-  if (decision.action === "ask_user") {
+  if (!writeResult.success) {
     return { action: "remember", decision: "needs_confirmation", success: false };
   }
 
-  const savedMemory = await saveAssistantMemory(decision.content || operation.content, decision.memoryType ?? memoryType);
   return {
     action: "remember",
-    savedMemory,
-    decision: decision.action === "keep_both" ? "kept_both" : "saved",
+    savedMemory: writeResult.savedMemory,
+    updatedMemory: writeResult.updatedMemory,
+    previousMemory: writeResult.previousMemory,
+    decision: writeResult.decision,
     success: true,
   };
 }
 
-async function findRelatedMemoriesForRemember(operation: Extract<ContextMemoryOperation, { action: "remember" }>) {
+async function findRelatedMemoriesForRemember(
+  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  facts: AssistantMemoryFact[],
+) {
   const queries = operation.targets.length ? operation.targets : [operation.content];
   const related = new Map<string, AssistantMemory>();
+
+  const factConflicts = await findAssistantMemoryFactConflicts(facts, 5);
+  for (const conflict of factConflicts) {
+    related.set(conflict.memory.id, conflict.memory);
+  }
 
   for (const query of queries) {
     const memories = await searchAssistantMemories(query, 5);
@@ -3642,27 +3640,171 @@ async function findRelatedMemoriesForRemember(operation: Extract<ContextMemoryOp
   return [...related.values()];
 }
 
-async function planRememberWriteDecisionWithModel(
+async function createStructuredMemoryFacts(
   operation: Extract<ContextMemoryOperation, { action: "remember" }>,
-  relatedMemories: AssistantMemory[],
   memoryType: AssistantMemoryType,
   locale: Locale,
-): Promise<RememberWriteDecision> {
-  const fallback = createFallbackRememberWriteDecision(operation, relatedMemories, memoryType);
+): Promise<AssistantMemoryFact[]> {
+  const fallbackFacts = createFallbackStructuredMemoryFacts(operation);
   try {
     const rawResult = await runAiTask({
       task: "prompt",
-      text: buildRememberWriteDecisionPrompt(operation, relatedMemories, memoryType, locale),
+      text: buildStructuredMemoryFactsPrompt(operation, memoryType, locale),
       locale,
     });
-    return normalizeRememberWriteDecision(rawResult, relatedMemories, fallback);
+    return normalizeStructuredMemoryFacts(rawResult, operation.content, fallbackFacts);
   } catch {
-    return fallback;
+    return fallbackFacts;
+  }
+}
+
+function buildStructuredMemoryFactsPrompt(
+  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  memoryType: AssistantMemoryType,
+  locale: Locale,
+) {
+  const payload = JSON.stringify({ content: operation.content, memoryType, targets: operation.targets }, null, 2);
+
+  return locale === "zh"
+    ? `你是 localAI 的个人记忆事实抽取器。请先理解用户要保存的信息，再只输出 JSON，不要输出 Markdown。
+
+目标：把原始自然语言转成结构化事实，供本地个人记忆系统可靠存储。
+
+要求：
+- 一个事实必须包含 subject、predicate、value、confidence、normalizedText。
+- subject 是事实主体，例如人、项目、偏好拥有者或对象。
+- predicate 必须使用固定枚举之一：identity、preference、name、location、project、role、status、relationship、attribute。
+- value 是该属性的当前值。
+- normalizedText 是一句自然、明确、去掉命令外壳后的事实陈述。
+- 不要编造用户没说的信息。
+
+输入：
+${payload}
+
+输出 schema：
+{"facts":[{"subject":"主体","predicate":"属性或关系","value":"值","confidence":0.0,"normalizedText":"自然事实陈述"}]}`
+    : `You are localAI's personal memory fact extractor. Understand the information to save, then output JSON only and no Markdown.
+
+Goal: convert natural language into structured facts for reliable local personal memory storage.
+
+Rules:
+- Each fact must include subject, predicate, value, confidence, and normalizedText.
+- subject is the entity, project, preference owner, or object.
+- predicate must be one of: identity, preference, name, location, project, role, status, relationship, attribute.
+- value is the current value of that attribute.
+- normalizedText is a natural factual statement without command wrapper words.
+- Do not invent information the user did not provide.
+
+Input:
+${payload}
+
+Output schema:
+{"facts":[{"subject":"subject","predicate":"attribute or relation","value":"value","confidence":0.0,"normalizedText":"natural factual statement"}]}`;
+}
+
+function normalizeStructuredMemoryFacts(
+  rawResult: string,
+  sourceText: string,
+  fallbackFacts: AssistantMemoryFact[],
+): AssistantMemoryFact[] {
+  const parsed = parseJsonObject(rawResult);
+  const facts = Array.isArray(parsed?.facts) ? parsed.facts : [];
+  const normalizedFacts = facts
+    .map((fact) => normalizeStructuredMemoryFact(fact, sourceText))
+    .filter((fact): fact is AssistantMemoryFact => Boolean(fact));
+  const groundedFacts = filterSourceGroundedAssistantMemoryFacts(normalizedFacts, sourceText);
+
+  return groundedFacts.length ? groundedFacts : fallbackFacts;
+}
+
+function normalizeStructuredMemoryFact(fact: unknown, sourceText: string): AssistantMemoryFact | undefined {
+  if (typeof fact !== "object" || fact === null) {
+    return undefined;
+  }
+
+  const record = fact as Partial<AssistantMemoryFact>;
+  const subject = typeof record.subject === "string" ? record.subject.trim() : "";
+  const predicate = typeof record.predicate === "string" ? record.predicate.trim() : "";
+  const value = typeof record.value === "string" ? record.value.trim() : "";
+  if (!subject || !predicate || !value) {
+    return undefined;
+  }
+
+  const confidence = typeof record.confidence === "number" && Number.isFinite(record.confidence)
+    ? Math.min(Math.max(record.confidence, 0), 1)
+    : 0.75;
+  const normalizedText = typeof record.normalizedText === "string" && record.normalizedText.trim()
+    ? record.normalizedText.trim()
+    : `${subject} ${predicate} ${value}`;
+
+  return {
+    subject,
+    predicate,
+    value,
+    confidence,
+    sourceText,
+    normalizedText,
+  };
+}
+
+function createFallbackStructuredMemoryFacts(operation: Extract<ContextMemoryOperation, { action: "remember" }>): AssistantMemoryFact[] {
+  const content = operation.content.trim();
+  const assertion = content.match(/^(.{1,40}?)(?:是|为)(.+)$/);
+  const subject = assertion?.[1]?.trim() || operation.targets[0] || "用户";
+  const value = assertion?.[2]?.trim() || content;
+
+  return [{
+    subject,
+    predicate: assertion ? "identity" : "attribute",
+    value,
+    confidence: 0.6,
+    sourceText: content,
+    normalizedText: assertion ? `${subject}是${value}` : content,
+  }];
+}
+
+async function planRememberWriteDecisionWithModel(
+  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  facts: AssistantMemoryFact[],
+  relatedMemories: AssistantMemory[],
+  memoryType: AssistantMemoryType,
+  locale: Locale,
+): Promise<AssistantMemoryWriteDecision | undefined> {
+  try {
+    const rawResult = await runAiTask({
+      task: "prompt",
+      text: buildRememberWriteDecisionPrompt(operation, facts, relatedMemories, memoryType, locale),
+      locale,
+    });
+    const parsed = parseJsonObject(rawResult);
+    if (!parsed || !isAssistantMemoryWriteDecisionAction(parsed.action)) {
+      return undefined;
+    }
+
+    return normalizeAssistantMemoryWriteDecision(
+      {
+        action: parsed.action,
+        existingMemoryId: typeof parsed.existingMemoryId === "string" ? parsed.existingMemoryId : undefined,
+        content: typeof parsed.content === "string" ? parsed.content : undefined,
+        memoryType: isAssistantMemoryType(parsed.memoryType) ? parsed.memoryType : undefined,
+        rationale: typeof parsed.rationale === "string" ? parsed.rationale : undefined,
+      },
+      relatedMemories,
+      createAssistantMemoryWriteDecision({
+        content: operation.content,
+        facts,
+        memoryType,
+        relatedMemories,
+      }),
+    );
+  } catch {
+    return undefined;
   }
 }
 
 function buildRememberWriteDecisionPrompt(
   operation: Extract<ContextMemoryOperation, { action: "remember" }>,
+  facts: AssistantMemoryFact[],
   relatedMemories: AssistantMemory[],
   memoryType: AssistantMemoryType,
   locale: Locale,
@@ -3678,10 +3820,10 @@ function buildRememberWriteDecisionPrompt(
 - 不要同时保留互相矛盾的事实。
 
 新记忆：
-${JSON.stringify({ content: operation.content, memoryType, targets: operation.targets }, null, 2)}
+${JSON.stringify({ content: operation.content, memoryType, targets: operation.targets, facts }, null, 2)}
 
 候选旧记忆：
-${JSON.stringify(relatedMemories.map((memory) => ({ id: memory.id, type: memory.type, content: memory.content })), null, 2)}
+${JSON.stringify(relatedMemories.map((memory) => ({ id: memory.id, type: memory.type, content: memory.content, facts: memory.facts })), null, 2)}
 
 输出 schema：
 {"action":"save_new|replace_existing|merge_with_existing|keep_both|ask_user","existingMemoryId":"旧记忆 id，可选","content":"最终要保存的自然事实，可选","memoryType":"preference|fact|project|task","rationale":"简短原因"}`
@@ -3695,65 +3837,21 @@ Rules:
 - Do not keep mutually contradictory facts at the same time.
 
 New memory:
-${JSON.stringify({ content: operation.content, memoryType, targets: operation.targets }, null, 2)}
+${JSON.stringify({ content: operation.content, memoryType, targets: operation.targets, facts }, null, 2)}
 
 Existing candidates:
-${JSON.stringify(relatedMemories.map((memory) => ({ id: memory.id, type: memory.type, content: memory.content })), null, 2)}
+${JSON.stringify(relatedMemories.map((memory) => ({ id: memory.id, type: memory.type, content: memory.content, facts: memory.facts })), null, 2)}
 
 Output schema:
 {"action":"save_new|replace_existing|merge_with_existing|keep_both|ask_user","existingMemoryId":"existing memory id, optional","content":"final natural fact to save, optional","memoryType":"preference|fact|project|task","rationale":"short reason"}`;
 }
 
-function normalizeRememberWriteDecision(
-  rawResult: string,
-  relatedMemories: AssistantMemory[],
-  fallback: RememberWriteDecision,
-): RememberWriteDecision {
-  const parsed = parseJsonObject(rawResult);
-  const allowedActions = new Set(["save_new", "replace_existing", "merge_with_existing", "keep_both", "ask_user"]);
-  if (!parsed || typeof parsed.action !== "string" || !allowedActions.has(parsed.action)) {
-    return fallback;
-  }
-
-  const relatedIds = new Set(relatedMemories.map((memory) => memory.id));
-  const existingMemoryId = typeof parsed.existingMemoryId === "string" && relatedIds.has(parsed.existingMemoryId)
-    ? parsed.existingMemoryId
-    : fallback.existingMemoryId;
-
-  if ((parsed.action === "replace_existing" || parsed.action === "merge_with_existing") && !existingMemoryId) {
-    return fallback;
-  }
-
-  return {
-    action: parsed.action as RememberWriteDecision["action"],
-    existingMemoryId,
-    content: typeof parsed.content === "string" && parsed.content.trim() ? parsed.content.trim() : fallback.content,
-    memoryType: isAssistantMemoryType(parsed.memoryType) ? parsed.memoryType : fallback.memoryType,
-    rationale: typeof parsed.rationale === "string" && parsed.rationale.trim() ? parsed.rationale.trim() : fallback.rationale,
-  };
-}
-
-function createFallbackRememberWriteDecision(
-  operation: Extract<ContextMemoryOperation, { action: "remember" }>,
-  relatedMemories: AssistantMemory[],
-  memoryType: AssistantMemoryType,
-): RememberWriteDecision {
-  if (relatedMemories.length === 1 && operation.targets.length) {
-    return {
-      action: "replace_existing",
-      existingMemoryId: relatedMemories[0].id,
-      content: operation.content,
-      memoryType,
-      rationale: "Found one existing memory for the same target.",
-    };
-  }
-
-  return {
-    action: "ask_user",
-    content: operation.content,
-    memoryType,
-    rationale: "Multiple related memories require confirmation.",
-  };
+function isAssistantMemoryWriteDecisionAction(value: unknown): value is AssistantMemoryWriteDecision["action"] {
+  return value === "save_new" ||
+    value === "replace_existing" ||
+    value === "merge_with_existing" ||
+    value === "keep_both" ||
+    value === "ask_user";
 }
 
 async function createMemoryOperationReply(
@@ -3761,71 +3859,7 @@ async function createMemoryOperationReply(
   result: MemoryOperationExecutionResult | undefined,
   locale: Locale,
 ) {
-  const fallback = formatMemoryOperationFallbackReply(operation, result, locale);
-  try {
-    const reply = await runAiTask({
-      task: "prompt",
-      text: buildMemoryOperationReplyPrompt(operation, result, locale),
-      locale,
-    });
-    return reply.trim() || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function buildMemoryOperationReplyPrompt(
-  operation: Exclude<ContextMemoryOperation, { action: "none" }>,
-  result: MemoryOperationExecutionResult | undefined,
-  locale: Locale,
-) {
-  const payload = JSON.stringify(createMemoryOperationReplyPayload(operation, result), null, 2);
-
-  return locale === "zh"
-    ? `你是 localAI。下面是一条已经由程序执行完的个人记忆操作。请像正常对话一样给用户一个简洁自然的回复。
-
-要求：
-- 不要输出 JSON、不要输出“执行日志”、不要用项目符号列出内部数据。
-- 如果成功，直接说明已经处理好，并自然概括处理了什么；不要提“条数”，除非用户明确问数量。
-- 如果没有找到可删除内容，直接说明没有找到对应记忆，不要要求用户反复确认。
-- 不要编造没有执行的结果。
-- 删除操作不要复述被删除记忆的原文，只说已经删除相关信息。
-
-操作结果：
-${payload}`
-    : `You are localAI. The following personal memory operation has already been executed by code. Reply naturally and concisely as a normal assistant.
-
-Rules:
-- Do not output JSON, execution logs, or bullet-list internal data.
-- If successful, say it is done and naturally summarize what changed; do not mention counts unless the user explicitly asked for counts.
-- If no matching memory was found, say so directly and do not ask for repeated confirmation.
-- Do not invent results that were not executed.
-- For delete operations, do not repeat the deleted memory text; just say the related information was removed.
-
-Operation result:
-${payload}`;
-}
-
-function createMemoryOperationReplyPayload(
-  operation: Exclude<ContextMemoryOperation, { action: "none" }>,
-  result: MemoryOperationExecutionResult | undefined,
-) {
-  if (operation.action === "remember") {
-    return {
-      action: "remember",
-      success: result?.action === "remember" && result.success,
-      content: operation.content,
-      targets: operation.targets,
-    };
-  }
-
-  return {
-    action: "forget",
-    success: result?.action === "forget" && result.success,
-    query: operation.query,
-    targets: operation.targets,
-    deletedCount: result?.action === "forget" ? result.deletedMemories.length : 0,
-  };
+  return formatMemoryOperationFallbackReply(operation, result, locale);
 }
 
 function formatMemoryOperationFallbackReply(
@@ -3835,7 +3869,13 @@ function formatMemoryOperationFallbackReply(
 ) {
   if (operation.action === "remember") {
     if (result?.action === "remember" && result.success) {
-      return locale === "zh" ? "已帮你记住。" : "I've saved that to memory.";
+      if (result.decision === "updated") {
+        return locale === "zh" ? `已更新，${operation.content}。` : `Updated: ${operation.content}.`;
+      }
+      if (result.decision === "merged") {
+        return locale === "zh" ? `已补充，${operation.content}。` : `Added that detail: ${operation.content}.`;
+      }
+      return locale === "zh" ? `记住了，${operation.content}。` : `Got it, I'll remember: ${operation.content}.`;
     }
     return locale === "zh"
       ? "这条记忆和已有内容相似，我先放到个人记忆面板里等你确认。"
@@ -3888,7 +3928,8 @@ function buildMemoryOperationPlanningPrompt(
 
 要求：
 - 只允许 action 为 "${allowedAction}"，不要改变用户要执行的操作类型。
-- content/query 必须去掉“请、帮我、记住、删除、个人记忆、关于、信息吧”等操作性外壳，只保留要存储或删除的事实主体。
+- remember 的 content 必须去掉“请、帮我、记住”等操作性外壳，但保留完整事实，例如“记住张三是一条狗”应输出 content: "张三是一条狗"。
+- forget 的 query 必须去掉“删除、个人记忆、关于、信息吧”等操作性外壳，只保留删除目标。
 - 如果用户一次提到多个并列对象，targets 必须拆成多个目标，例如“张三和李四”应为 ["张三","李四"]。
 - remember 的 content 要是经过理解后的自然事实，不要保存命令句本身；memoryType 只能是 preference、fact、project、task。
 - 不要编造用户没有说过的信息。
@@ -3902,7 +3943,8 @@ ${input}`
 
 Rules:
 - The only allowed action is "${allowedAction}"; do not change the requested operation type.
-- content/query must remove command wrapper words and keep only the fact or deletion subject.
+- For remember, content must remove command wrapper words but keep the complete fact.
+- For forget, query must remove command wrapper words and keep only the deletion target.
 - Split multiple coordinated targets, for example "Alice and Bob" becomes ["Alice","Bob"].
 - For remember, content must be the understood memory fact, not the command sentence; memoryType must be preference, fact, project, or task.
 - Do not invent information the user did not provide.
@@ -3931,8 +3973,9 @@ function normalizeModelMemoryOperation(rawResult: string, fallbackOperation: Con
   const targets = normalizeStringArray(parsed.targets);
 
   if (fallbackOperation.action === "remember") {
-    const content = typeof parsed.content === "string" && parsed.content.trim()
-      ? parsed.content.trim()
+    const parsedContent = typeof parsed.content === "string" ? parsed.content.trim() : "";
+    const content = parsedContent && isAssistantMemoryTextGroundedInSource(parsedContent, fallbackOperation.content)
+      ? parsedContent
       : fallbackOperation.content;
     const memoryType = isAssistantMemoryType(parsed.memoryType) ? parsed.memoryType : fallbackOperation.memoryType;
 
