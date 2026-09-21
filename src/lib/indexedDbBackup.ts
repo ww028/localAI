@@ -1,3 +1,9 @@
+import {
+  KNOWLEDGE_DB_NAME,
+  KNOWLEDGE_DB_STORES,
+  KNOWLEDGE_DB_VERSION,
+} from "./knowledgeDbSchema";
+
 type StoreSpec = {
   name: string;
   indexes: Array<{
@@ -92,6 +98,13 @@ type KnowledgeSpaceBackupRecord = {
   updatedAt: number;
 };
 
+type KnowledgeTermIndexBackupRecord = {
+  id: string;
+  spaceId: string;
+  term: string;
+  chunkId: string;
+};
+
 type AssistantMemoryBackupRecord = {
   id: string;
   type: "preference" | "fact" | "project" | "task";
@@ -105,6 +118,7 @@ export type IndexedDbImportResult = {
   databaseCount: number;
   storeCount: number;
   recordCount: number;
+  rollbackUsed: boolean;
 };
 
 const DATABASE_SPECS: DatabaseSpec[] = [
@@ -120,16 +134,16 @@ const DATABASE_SPECS: DatabaseSpec[] = [
     ],
   },
   {
-    name: "local-ai-knowledge",
-    version: 2,
+    name: KNOWLEDGE_DB_NAME,
+    version: KNOWLEDGE_DB_VERSION,
     stores: [
       {
-        name: "documents",
+        name: KNOWLEDGE_DB_STORES[0].name,
         indexes: [{ name: "spaceId", keyPath: "spaceId" }],
         validateRecord: isKnowledgeDocumentRecord,
       },
       {
-        name: "chunks",
+        name: KNOWLEDGE_DB_STORES[1].name,
         indexes: [
           { name: "documentId", keyPath: "documentId" },
           { name: "spaceId", keyPath: "spaceId" },
@@ -137,9 +151,18 @@ const DATABASE_SPECS: DatabaseSpec[] = [
         validateRecord: isKnowledgeChunkRecord,
       },
       {
-        name: "spaces",
+        name: KNOWLEDGE_DB_STORES[2].name,
         indexes: [],
         validateRecord: isKnowledgeSpaceRecord,
+      },
+      {
+        name: KNOWLEDGE_DB_STORES[3].name,
+        indexes: [
+          { name: "spaceId", keyPath: "spaceId" },
+          { name: "term", keyPath: "term" },
+          { name: "chunkId", keyPath: "chunkId" },
+        ],
+        validateRecord: isKnowledgeTermIndexRecord,
       },
     ],
   },
@@ -240,22 +263,51 @@ export async function exportPortableAiData(): Promise<string> {
 export async function importAllIndexedDbData(json: string): Promise<IndexedDbImportResult> {
   const backup = parseBackup(json);
   const result = summarizeBackup(backup);
+  const snapshotJson = await exportAllIndexedDbData();
+  const snapshot = parseBackup(snapshotJson);
 
-  for (const databaseSpec of DATABASE_SPECS) {
-    const databaseBackup = backup.databases.find((database) => database.name === databaseSpec.name);
-    if (!databaseBackup) {
-      throw new Error(`Missing database: ${databaseSpec.name}`);
+  try {
+    for (const databaseSpec of DATABASE_SPECS) {
+      const databaseBackup = backup.databases.find((database) => database.name === databaseSpec.name);
+      if (!databaseBackup) {
+        throw new Error(`Missing database: ${databaseSpec.name}`);
+      }
+
+      const db = await openDatabase(databaseSpec);
+      try {
+        await replaceDatabaseStores(db, databaseSpec, databaseBackup);
+      } finally {
+        db.close();
+      }
     }
 
-    const db = await openDatabase(databaseSpec);
+    return {
+      ...result,
+      rollbackUsed: false,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     try {
-      await replaceDatabaseStores(db, databaseSpec, databaseBackup);
-    } finally {
-      db.close();
-    }
-  }
+      for (const databaseSpec of DATABASE_SPECS) {
+        const databaseBackup = snapshot.databases.find((database) => database.name === databaseSpec.name);
+        if (!databaseBackup) {
+          continue;
+        }
 
-  return result;
+        const db = await openDatabase(databaseSpec);
+        try {
+          await replaceDatabaseStores(db, databaseSpec, databaseBackup);
+        } finally {
+          db.close();
+        }
+      }
+    } catch (rollbackError) {
+      const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      throw new Error(`Import failed, and rollback also failed. ${message} Rollback error: ${rollbackMessage}`);
+    }
+
+    throw new Error(`Import failed and previous local data was restored. ${message}`);
+  }
 }
 
 function openDatabase(databaseSpec: DatabaseSpec): Promise<IDBDatabase> {
@@ -376,7 +428,7 @@ function parseBackup(json: string): AppBackup {
   return backup;
 }
 
-function summarizeBackup(backup: AppBackup): IndexedDbImportResult {
+function summarizeBackup(backup: AppBackup): Omit<IndexedDbImportResult, "rollbackUsed"> {
   let storeCount = 0;
   let recordCount = 0;
 
@@ -444,6 +496,14 @@ function isKnowledgeSpaceRecord(value: unknown): value is KnowledgeSpaceBackupRe
     isString(value.name) &&
     isNumber(value.createdAt) &&
     isNumber(value.updatedAt);
+}
+
+function isKnowledgeTermIndexRecord(value: unknown): value is KnowledgeTermIndexBackupRecord {
+  return isPlainObject(value) &&
+    isString(value.id) &&
+    isString(value.spaceId) &&
+    isString(value.term) &&
+    isString(value.chunkId);
 }
 
 function isAssistantMemoryRecord(value: unknown): value is AssistantMemoryBackupRecord {

@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "name": "localAI memory operation baseline",
+  "description": "Manual baseline cases for validating remember/forget parsing and deterministic memory write behavior.",
+  "cases": [
+    {
+      "id": "remember-project-fact",
+      "input": "记住 我的项目叫 localAI",
+      "expectedPlan": {
+        "action": "remember",
+        "content": "我的项目叫 localAI"
+      },
+      "expectedBehavior": [
+        "应被识别为 remember。",
+        "不应把命令壳保存为记忆内容。"
+      ]
+    },
+    {
+      "id": "forget-multiple-targets",
+      "input": "删除个人记忆里关于张三和李四的信息吧",
+      "expectedPlan": {
+        "action": "forget",
+        "targets": ["张三", "李四"]
+      },
+      "expectedBehavior": [
+        "应拆分多个删除目标。",
+        "删除应只命中明确相关记忆。"
+      ]
+    },
+    {
+      "id": "replace-same-fact-slot",
+      "input": "记住 张三是一只猫",
+      "existingMemories": [
+        "张三是一条狗"
+      ],
+      "expectedBehavior": [
+        "同一 subject + predicate 槽位应触发 replace_existing 或 ask_user，不应无条件保留两条冲突事实。"
+      ]
+    }
+  ]
+}

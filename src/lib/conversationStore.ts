@@ -1,21 +1,24 @@
 import type { Locale } from "./chromeAi";
 import type { AiTask } from "./chromeAi";
 import type { DeterministicExecution } from "./assistantDeterministicExecutor";
+import type { GuardEvent } from "./assistantOutputGuard";
 import type { AssistantIntent } from "./assistantIntent";
 import type { AssistantPlan } from "./assistantPlanner";
-import type { KnowledgeMatch } from "./knowledgeStore";
+import type { ContextPlan } from "./assistantContextPlan";
 
 export type StoredChatMessage = {
   id: string;
   role: "assistant" | "user";
   text: string;
-  sources?: Array<{
-    sourceType?: "knowledge" | "memory";
-    sourceLabel?: string;
-    documentName: string;
-    chunkIndex: number;
-    text: string;
-  }>;
+  sources?: StoredMessageSource[];
+};
+
+export type StoredMessageSource = {
+  sourceType?: "knowledge" | "memory";
+  sourceLabel?: string;
+  documentName: string;
+  chunkIndex: number;
+  text: string;
 };
 
 export type ConversationStatus =
@@ -30,15 +33,20 @@ export type ConversationStatus =
 
 export type StoredTaskState = {
   id: string;
+  traceId?: string;
   kind: "chat" | "text-action" | "web-page";
   aiTask: AiTask;
   status: ConversationStatus;
   originalInput: string;
   promptText: string;
-  sources: KnowledgeMatch[];
+  sources: StoredMessageSource[];
   intent?: AssistantIntent;
   plan?: AssistantPlan;
+  contextPlan?: ContextPlan;
   deterministicExecution?: DeterministicExecution;
+  guardEvents?: GuardEvent[];
+  rawModelOutput?: string;
+  finalizedOutput?: string;
   error?: string;
   createdAt: number;
   updatedAt: number;
@@ -102,20 +110,24 @@ export async function saveConversation(conversation: StoredConversation) {
   });
 }
 
-export async function listConversations(): Promise<StoredConversation[]> {
+export async function listConversations(limit = 12): Promise<StoredConversation[]> {
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, "readonly");
-    const request = transaction.objectStore(STORE_NAME).getAll();
+    const conversations: StoredConversation[] = [];
+    const request = transaction.objectStore(STORE_NAME).index("updatedAt").openCursor(null, "prev");
 
     request.onsuccess = () => {
-      db.close();
-      resolve(
-        request.result
-          .sort((left, right) => right.updatedAt - left.updatedAt)
-          .slice(0, 12),
-      );
+      const cursor = request.result;
+      if (!cursor || conversations.length >= limit) {
+        db.close();
+        resolve(conversations);
+        return;
+      }
+
+      conversations.push(cursor.value);
+      cursor.continue();
     };
 
     request.onerror = () => {

@@ -64,3 +64,25 @@ npm run build
 2. 对每个 query 调用 `searchKnowledge()`。
 3. 检查 top-k 结果是否包含 `mustAppearInSnippet`。
 4. 导出 JSON 报告，用于比较不同检索策略的变化。
+
+
+## 扩展评测集
+
+除知识库检索评测外，项目还提供以下人工基线评测集：
+
+- `examples/memory-answer-eval.json`：检查个人记忆问答、二人称改写和本地证据边界。
+- `examples/memory-operation-eval.json`：检查 remember / forget 的结构化解析与覆盖策略。
+- `examples/prompt-injection-eval.json`：检查网页正文和知识库中的恶意指令不会被执行。
+
+建议在调整记忆系统、输出护栏、Prompt 约束或 finalize 流程后，一并回归这些评测集。
+
+
+## 最小评测 Runner
+
+项目当前提供一个最小可用的评测脚本：
+
+```bash
+npm run eval
+```
+
+当前脚本会对知识库评测集执行基于当前 chunk 切分逻辑的内存检索命中检查，并输出一份 Markdown 摘要报告。其他评测集当前仍以结构校验和人工基线为主，后续可以继续把它们接到 answer-level 回归执行器。

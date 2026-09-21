@@ -194,6 +194,9 @@ npm run build
 
 - [examples/localai-knowledge-demo.md](examples/localai-knowledge-demo.md)
 - [examples/knowledge-retrieval-eval.json](examples/knowledge-retrieval-eval.json)
+- [examples/memory-answer-eval.json](examples/memory-answer-eval.json)
+- [examples/memory-operation-eval.json](examples/memory-operation-eval.json)
+- [examples/prompt-injection-eval.json](examples/prompt-injection-eval.json)
 
 可测试：
 
@@ -272,6 +275,7 @@ npm run test:prompt
 npm run test:intent
 npm run test:planner
 npm run test:executor
+npm run eval       # 运行最小评测清单校验与摘要报告
 ```
 
 ## 给开发同学
@@ -281,6 +285,7 @@ README 只保留功能介绍和使用说明。技术实现请优先看：
 - [localAI Chrome 插件技术架构与功能自测](docs/localai-extension-overview.md)
 - [Chrome Built-in AI Notes](docs/chrome-built-in-ai.md)
 - [知识库检索评测](docs/knowledge-retrieval-evaluation.md)
+- [AI 工程化路线图](docs/ai-engineering-roadmap.md)
 
 如果文档之间出现冲突，以 [docs/localai-extension-overview.md](docs/localai-extension-overview.md) 为准。
 

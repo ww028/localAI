@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "localAI memory answer baseline",
+  "description": "Manual baseline cases for validating memory-grounded answers and tone normalization.",
+  "cases": [
+    {
+      "id": "user-preference-direct-style",
+      "query": "我的回答风格偏好是什么？",
+      "memoryFixtures": [
+        "我的回答风格偏好是简洁直接"
+      ],
+      "expectedAnswerPoints": [
+        "回答应说明用户偏好简洁直接。",
+        "回答应使用面向用户的表达，不应保留第一人称原句。",
+        "回答不应输出内部标签如 preference 或 长期事实。"
+      ]
+    },
+    {
+      "id": "entity-local-evidence-required",
+      "query": "张三是谁？",
+      "memoryFixtures": [],
+      "expectedAnswerPoints": [
+        "在没有本地记忆或知识命中的情况下，回答应明确说明没有保存相关信息。",
+        "回答不应编造张三的身份。"
+      ]
+    },
+    {
+      "id": "memory-second-person-normalization",
+      "query": "你还记得我喜欢什么吗？",
+      "memoryFixtures": [
+        "我喜欢中文回答和简洁表达"
+      ],
+      "expectedAnswerPoints": [
+        "回答应改写成面向用户的表达，例如你喜欢中文回答和简洁表达。",
+        "回答不应写成我喜欢中文回答。"
+      ]
+    }
+  ]
+}

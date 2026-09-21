@@ -1,3 +1,13 @@
+import {
+  KNOWLEDGE_CHUNK_STORE,
+  KNOWLEDGE_DB_NAME,
+  KNOWLEDGE_DB_STORES,
+  KNOWLEDGE_DB_VERSION,
+  KNOWLEDGE_DOCUMENT_STORE,
+  KNOWLEDGE_SPACE_STORE,
+  KNOWLEDGE_TERM_INDEX_STORE,
+} from "./knowledgeDbSchema";
+
 export type KnowledgeDocument = {
   id: string;
   spaceId: string;
@@ -20,6 +30,13 @@ export type KnowledgeChunk = {
   embedding: number[];
   embeddingModel: string;
   createdAt: number;
+};
+
+type KnowledgeTermIndexRecord = {
+  id: string;
+  spaceId: string;
+  term: string;
+  chunkId: string;
 };
 
 export type KnowledgeMatch = {
@@ -45,12 +62,18 @@ export type RebuildKnowledgeIndexResult = {
   embeddingDimensions: number;
 };
 
-const DB_NAME = "local-ai-knowledge";
-const DB_VERSION = 2;
+export type KnowledgeImportProgress = {
+  completedFiles: number;
+  totalFiles: number;
+  completedChunks: number;
+  totalChunks: number;
+  currentFileName: string;
+  ratio: number;
+  message: string;
+};
+
 const DEFAULT_SPACE_ID = "default";
-const DOCUMENT_STORE = "documents";
-const CHUNK_STORE = "chunks";
-const SPACE_STORE = "spaces";
+export const MAX_KNOWLEDGE_FILE_SIZE = 5 * 1024 * 1024;
 const MAX_CHUNK_LENGTH = 900;
 const CHUNK_OVERLAP = 120;
 const EMBEDDING_DIMENSIONS = 384;
@@ -68,31 +91,24 @@ const RERANK_DENSITY_WEIGHT = 6;
 
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(KNOWLEDGE_DB_NAME, KNOWLEDGE_DB_VERSION);
 
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(DOCUMENT_STORE)) {
-        const store = db.createObjectStore(DOCUMENT_STORE, { keyPath: "id" });
-        store.createIndex("spaceId", "spaceId");
-      } else {
-        const store = request.transaction?.objectStore(DOCUMENT_STORE);
-        if (store && !store.indexNames.contains("spaceId")) {
-          store.createIndex("spaceId", "spaceId");
+      for (const storeSpec of KNOWLEDGE_DB_STORES) {
+        const store = db.objectStoreNames.contains(storeSpec.name)
+          ? request.transaction?.objectStore(storeSpec.name)
+          : db.createObjectStore(storeSpec.name, { keyPath: "id" });
+
+        if (!store) {
+          continue;
         }
-      }
-      if (!db.objectStoreNames.contains(CHUNK_STORE)) {
-        const store = db.createObjectStore(CHUNK_STORE, { keyPath: "id" });
-        store.createIndex("documentId", "documentId");
-        store.createIndex("spaceId", "spaceId");
-      } else {
-        const store = request.transaction?.objectStore(CHUNK_STORE);
-        if (store && !store.indexNames.contains("spaceId")) {
-          store.createIndex("spaceId", "spaceId");
+
+        for (const index of storeSpec.indexes) {
+          if (!store.indexNames.contains(index.name)) {
+            store.createIndex(index.name, index.keyPath);
+          }
         }
-      }
-      if (!db.objectStoreNames.contains(SPACE_STORE)) {
-        db.createObjectStore(SPACE_STORE, { keyPath: "id" });
       }
       migrateKnowledgeDatabase(request.transaction);
     };
@@ -108,13 +124,13 @@ function migrateKnowledgeDatabase(transaction: IDBTransaction | null) {
   }
 
   const now = Date.now();
-  transaction.objectStore(SPACE_STORE).put({
+  transaction.objectStore(KNOWLEDGE_SPACE_STORE).put({
     ...getDefaultKnowledgeSpace(),
     createdAt: now,
     updatedAt: now,
   });
 
-  const documentStore = transaction.objectStore(DOCUMENT_STORE);
+  const documentStore = transaction.objectStore(KNOWLEDGE_DOCUMENT_STORE);
   documentStore.openCursor().onsuccess = (event) => {
     const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
     if (!cursor) {
@@ -131,7 +147,8 @@ function migrateKnowledgeDatabase(transaction: IDBTransaction | null) {
     cursor.continue();
   };
 
-  const chunkStore = transaction.objectStore(CHUNK_STORE);
+  const chunkStore = transaction.objectStore(KNOWLEDGE_CHUNK_STORE);
+  const termStore = transaction.objectStore(KNOWLEDGE_TERM_INDEX_STORE);
   chunkStore.openCursor().onsuccess = (event) => {
     const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
     if (!cursor) {
@@ -139,11 +156,16 @@ function migrateKnowledgeDatabase(transaction: IDBTransaction | null) {
     }
 
     const chunk = cursor.value as Partial<KnowledgeChunk>;
-    if (!chunk.spaceId) {
-      cursor.update({
-        ...chunk,
-        spaceId: DEFAULT_SPACE_ID,
-      });
+    const migratedChunk = {
+      ...chunk,
+      spaceId: chunk.spaceId ?? DEFAULT_SPACE_ID,
+      terms: chunk.terms?.length ? chunk.terms : tokenize(chunk.text ?? ""),
+    } as KnowledgeChunk;
+    if (!chunk.spaceId || !chunk.terms?.length) {
+      cursor.update(migratedChunk);
+    }
+    for (const record of createTermIndexRecords(migratedChunk)) {
+      termStore.put(record);
     }
     cursor.continue();
   };
@@ -170,8 +192,8 @@ async function ensureKnowledgeSpace(spaceId: string) {
   };
 
   return new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(SPACE_STORE, "readwrite");
-    transaction.objectStore(SPACE_STORE).put(space);
+    const transaction = db.transaction(KNOWLEDGE_SPACE_STORE, "readwrite");
+    transaction.objectStore(KNOWLEDGE_SPACE_STORE).put(space);
     transaction.oncomplete = () => {
       db.close();
       resolve();
@@ -183,17 +205,56 @@ async function ensureKnowledgeSpace(spaceId: string) {
   });
 }
 
-export async function importKnowledgeFiles(files: File[], spaceId = DEFAULT_SPACE_ID) {
+export async function importKnowledgeFiles(
+  files: File[],
+  spaceId = DEFAULT_SPACE_ID,
+  options: {
+    locale?: "zh" | "en";
+    maxFileSize?: number;
+    onProgress?: (progress: KnowledgeImportProgress) => void;
+  } = {},
+) {
   await ensureKnowledgeSpace(spaceId);
   const documents: KnowledgeDocument[] = [];
+  const locale = options.locale ?? "zh";
+  const maxFileSize = options.maxFileSize ?? MAX_KNOWLEDGE_FILE_SIZE;
+  const preparedFiles = await Promise.all(files.map(async (file) => {
+    if (file.size > maxFileSize) {
+      throw new Error(formatKnowledgeImportTooLargeMessage(file.name, maxFileSize, locale));
+    }
 
-  for (const file of files) {
     const text = await file.text();
+    return {
+      file,
+      text,
+      chunks: createChunks(text),
+    };
+  }));
+  const totalChunks = preparedFiles.reduce((sum, entry) => sum + Math.max(entry.chunks.length, 1), 0);
+  let completedChunks = 0;
+  let completedFiles = 0;
+
+  const emitProgress = (currentFileName: string) => {
+    const ratio = totalChunks ? completedChunks / totalChunks : 1;
+    options.onProgress?.({
+      completedFiles,
+      totalFiles: preparedFiles.length,
+      completedChunks,
+      totalChunks,
+      currentFileName,
+      ratio,
+      message: formatKnowledgeImportProgressMessage(currentFileName, completedFiles, preparedFiles.length, locale),
+    });
+  };
+
+  for (const { file, text, chunks: preparedChunks } of preparedFiles) {
     const createdAt = Date.now();
     const documentId = crypto.randomUUID();
     const chunks: KnowledgeChunk[] = [];
 
-    for (const [index, chunk] of createChunks(text).entries()) {
+    emitProgress(file.name);
+
+    for (const [index, chunk] of preparedChunks.entries()) {
       const embedding = await createTextEmbedding(chunk);
       chunks.push({
         id: `${documentId}:${index}`,
@@ -207,6 +268,8 @@ export async function importKnowledgeFiles(files: File[], spaceId = DEFAULT_SPAC
         embeddingModel: embedding.model,
         createdAt,
       });
+      completedChunks += 1;
+      emitProgress(file.name);
     }
 
     const document: KnowledgeDocument = {
@@ -222,9 +285,42 @@ export async function importKnowledgeFiles(files: File[], spaceId = DEFAULT_SPAC
 
     await saveDocumentWithChunks(document, chunks);
     documents.push(document);
+    completedFiles += 1;
+    completedChunks += preparedChunks.length ? 0 : 1;
+    emitProgress(file.name);
   }
 
   return documents;
+}
+
+function formatKnowledgeImportTooLargeMessage(fileName: string, maxFileSize: number, locale: "zh" | "en") {
+  const sizeLabel = formatKnowledgeFileSize(maxFileSize);
+  return locale === "zh"
+    ? `知识文件 ${fileName} 超过大小限制 ${sizeLabel}。`
+    : `Knowledge file ${fileName} exceeds the size limit of ${sizeLabel}.`;
+}
+
+function formatKnowledgeImportProgressMessage(
+  fileName: string,
+  completedFiles: number,
+  totalFiles: number,
+  locale: "zh" | "en",
+) {
+  return locale === "zh"
+    ? `正在导入知识文件 ${completedFiles}/${totalFiles}: ${fileName}`
+    : `Importing knowledge file ${completedFiles}/${totalFiles}: ${fileName}`;
+}
+
+function formatKnowledgeFileSize(size: number) {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
 export async function listKnowledgeDocuments(spaceId = DEFAULT_SPACE_ID): Promise<KnowledgeDocument[]> {
@@ -232,8 +328,8 @@ export async function listKnowledgeDocuments(spaceId = DEFAULT_SPACE_ID): Promis
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(DOCUMENT_STORE, "readonly");
-    const request = transaction.objectStore(DOCUMENT_STORE).index("spaceId").getAll(spaceId);
+    const transaction = db.transaction(KNOWLEDGE_DOCUMENT_STORE, "readonly");
+    const request = transaction.objectStore(KNOWLEDGE_DOCUMENT_STORE).index("spaceId").getAll(spaceId);
 
     request.onsuccess = () => {
       db.close();
@@ -250,8 +346,8 @@ export async function listKnowledgeSpaces(): Promise<KnowledgeSpace[]> {
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(SPACE_STORE, "readonly");
-    const request = transaction.objectStore(SPACE_STORE).getAll();
+    const transaction = db.transaction(KNOWLEDGE_SPACE_STORE, "readonly");
+    const request = transaction.objectStore(KNOWLEDGE_SPACE_STORE).getAll();
 
     request.onsuccess = () => {
       db.close();
@@ -281,8 +377,8 @@ export async function createKnowledgeSpace(name: string): Promise<KnowledgeSpace
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(SPACE_STORE, "readwrite");
-    transaction.objectStore(SPACE_STORE).put(space);
+    const transaction = db.transaction(KNOWLEDGE_SPACE_STORE, "readwrite");
+    transaction.objectStore(KNOWLEDGE_SPACE_STORE).put(space);
     transaction.oncomplete = () => {
       db.close();
       resolve(space);
@@ -298,10 +394,10 @@ export async function deleteKnowledgeDocument(documentId: string): Promise<void>
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction([DOCUMENT_STORE, CHUNK_STORE], "readwrite");
-    transaction.objectStore(DOCUMENT_STORE).delete(documentId);
+    const transaction = db.transaction([KNOWLEDGE_DOCUMENT_STORE, KNOWLEDGE_CHUNK_STORE, KNOWLEDGE_TERM_INDEX_STORE], "readwrite");
+    transaction.objectStore(KNOWLEDGE_DOCUMENT_STORE).delete(documentId);
 
-    const chunkStore = transaction.objectStore(CHUNK_STORE);
+    const chunkStore = transaction.objectStore(KNOWLEDGE_CHUNK_STORE);
     const index = chunkStore.index("documentId");
     const request = index.openKeyCursor(IDBKeyRange.only(documentId));
 
@@ -312,6 +408,7 @@ export async function deleteKnowledgeDocument(documentId: string): Promise<void>
       }
 
       chunkStore.delete(cursor.primaryKey);
+      deleteTermIndexForChunk(transaction.objectStore(KNOWLEDGE_TERM_INDEX_STORE), String(cursor.primaryKey));
       cursor.continue();
     };
     transaction.oncomplete = () => {
@@ -329,8 +426,8 @@ export async function clearKnowledgeDocuments(spaceId = DEFAULT_SPACE_ID): Promi
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction([DOCUMENT_STORE, CHUNK_STORE], "readwrite");
-    const documentStore = transaction.objectStore(DOCUMENT_STORE);
+    const transaction = db.transaction([KNOWLEDGE_DOCUMENT_STORE, KNOWLEDGE_CHUNK_STORE, KNOWLEDGE_TERM_INDEX_STORE], "readwrite");
+    const documentStore = transaction.objectStore(KNOWLEDGE_DOCUMENT_STORE);
     const documentIndex = documentStore.index("spaceId");
     const documentRequest = documentIndex.openKeyCursor(IDBKeyRange.only(spaceId));
     documentRequest.onsuccess = () => {
@@ -342,7 +439,7 @@ export async function clearKnowledgeDocuments(spaceId = DEFAULT_SPACE_ID): Promi
       cursor.continue();
     };
 
-    const chunkStore = transaction.objectStore(CHUNK_STORE);
+    const chunkStore = transaction.objectStore(KNOWLEDGE_CHUNK_STORE);
     const chunkIndex = chunkStore.index("spaceId");
     const chunkRequest = chunkIndex.openKeyCursor(IDBKeyRange.only(spaceId));
     chunkRequest.onsuccess = () => {
@@ -351,6 +448,17 @@ export async function clearKnowledgeDocuments(spaceId = DEFAULT_SPACE_ID): Promi
         return;
       }
       chunkStore.delete(cursor.primaryKey);
+      cursor.continue();
+    };
+
+    const termStore = transaction.objectStore(KNOWLEDGE_TERM_INDEX_STORE);
+    const termRequest = termStore.index("spaceId").openKeyCursor(IDBKeyRange.only(spaceId));
+    termRequest.onsuccess = () => {
+      const cursor = termRequest.result;
+      if (!cursor) {
+        return;
+      }
+      termStore.delete(cursor.primaryKey);
       cursor.continue();
     };
 
@@ -378,49 +486,52 @@ export async function searchKnowledge(query: string, limit = 5, spaceId = DEFAUL
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(CHUNK_STORE, "readonly");
-    const request = transaction.objectStore(CHUNK_STORE).index("spaceId").getAll(spaceId);
+    const transaction = db.transaction([KNOWLEDGE_CHUNK_STORE, KNOWLEDGE_TERM_INDEX_STORE], "readonly");
+    const chunkStore = transaction.objectStore(KNOWLEDGE_CHUNK_STORE);
+    const termStore = transaction.objectStore(KNOWLEDGE_TERM_INDEX_STORE);
+    const candidateLimit = Math.max(limit * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES);
 
-    request.onsuccess = () => {
-      db.close();
-      const candidateLimit = Math.max(limit * RERANK_CANDIDATE_MULTIPLIER, MIN_RERANK_CANDIDATES);
-      const candidates = request.result
-        .map((chunk: KnowledgeChunk) => {
-          const chunkEmbedding = selectCompatibleEmbedding(chunk, queryEmbedding);
-          const compatibleQueryEmbedding =
-            chunkEmbedding.model === queryEmbedding.model
-              ? queryEmbedding
-              : (localQueryEmbedding ??= createLocalTextEmbedding(query));
+    collectCandidateChunkIds(termStore, spaceId, queryTerms, candidateLimit * 3)
+      .then((candidateIds) => readCandidateChunks(chunkStore, spaceId, candidateIds))
+      .then((chunks) => {
+        const candidates = chunks
+          .map((chunk: KnowledgeChunk) => {
+            const chunkEmbedding = selectCompatibleEmbedding(chunk, queryEmbedding);
+            const compatibleQueryEmbedding =
+              chunkEmbedding.model === queryEmbedding.model
+                ? queryEmbedding
+                : (localQueryEmbedding ??= createLocalTextEmbedding(query));
 
-          const vectorScore = cosineSimilarity(
-            compatibleQueryEmbedding.values,
-            chunkEmbedding.values,
-          );
-          const keywordScore = scoreChunk(queryTerms, chunk);
-          const coarseScore = vectorScore * VECTOR_WEIGHT + keywordScore * KEYWORD_WEIGHT;
+            const vectorScore = cosineSimilarity(
+              compatibleQueryEmbedding.values,
+              chunkEmbedding.values,
+            );
+            const keywordScore = scoreChunk(queryTerms, chunk);
+            const coarseScore = vectorScore * VECTOR_WEIGHT + keywordScore * KEYWORD_WEIGHT;
 
-          return {
-            chunk,
-            vectorScore,
-            keywordScore,
-            coarseScore,
-            documentId: chunk.documentId,
-            spaceId: chunk.spaceId ?? DEFAULT_SPACE_ID,
-            documentName: chunk.documentName,
-            chunkIndex: chunk.index,
-            text: chunk.text,
-          };
-        })
-        .filter((candidate: SearchCandidate) => candidate.coarseScore > 0)
-        .sort((left: SearchCandidate, right: SearchCandidate) => right.coarseScore - left.coarseScore)
-        .slice(0, candidateLimit);
-      const matches = rerankKnowledgeCandidates(candidates, queryProfile).slice(0, limit);
-      resolve(matches);
-    };
-    request.onerror = () => {
-      db.close();
-      reject(request.error ?? new Error("Failed to search knowledge."));
-    };
+            return {
+              chunk,
+              vectorScore,
+              keywordScore,
+              coarseScore,
+              documentId: chunk.documentId,
+              spaceId: chunk.spaceId ?? DEFAULT_SPACE_ID,
+              documentName: chunk.documentName,
+              chunkIndex: chunk.index,
+              text: chunk.text,
+            };
+          })
+          .filter((candidate: SearchCandidate) => candidate.coarseScore > 0)
+          .sort((left: SearchCandidate, right: SearchCandidate) => right.coarseScore - left.coarseScore)
+          .slice(0, candidateLimit);
+        const matches = rerankKnowledgeCandidates(candidates, queryProfile).slice(0, limit);
+        db.close();
+        resolve(matches);
+      })
+      .catch((error) => {
+        db.close();
+        reject(error instanceof Error ? error : new Error("Failed to search knowledge."));
+      });
   });
 }
 
@@ -464,10 +575,14 @@ function saveDocumentWithChunks(document: KnowledgeDocument, chunks: KnowledgeCh
   return openDatabase().then(
     (db) =>
       new Promise<void>((resolve, reject) => {
-        const transaction = db.transaction([DOCUMENT_STORE, CHUNK_STORE], "readwrite");
-        transaction.objectStore(DOCUMENT_STORE).put(document);
-        const chunkStore = transaction.objectStore(CHUNK_STORE);
-        chunks.forEach((chunk) => chunkStore.put(chunk));
+        const transaction = db.transaction([KNOWLEDGE_DOCUMENT_STORE, KNOWLEDGE_CHUNK_STORE, KNOWLEDGE_TERM_INDEX_STORE], "readwrite");
+        transaction.objectStore(KNOWLEDGE_DOCUMENT_STORE).put(document);
+        const chunkStore = transaction.objectStore(KNOWLEDGE_CHUNK_STORE);
+        const termStore = transaction.objectStore(KNOWLEDGE_TERM_INDEX_STORE);
+        chunks.forEach((chunk) => {
+          chunkStore.put(chunk);
+          createTermIndexRecords(chunk).forEach((record) => termStore.put(record));
+        });
         transaction.oncomplete = () => {
           db.close();
           resolve();
@@ -484,8 +599,8 @@ async function listKnowledgeChunks(spaceId: string): Promise<KnowledgeChunk[]> {
   const db = await openDatabase();
 
   return new Promise((resolve, reject) => {
-    const transaction = db.transaction(CHUNK_STORE, "readonly");
-    const request = transaction.objectStore(CHUNK_STORE).index("spaceId").getAll(spaceId);
+    const transaction = db.transaction(KNOWLEDGE_CHUNK_STORE, "readonly");
+    const request = transaction.objectStore(KNOWLEDGE_CHUNK_STORE).index("spaceId").getAll(spaceId);
 
     request.onsuccess = () => {
       db.close();
@@ -506,11 +621,24 @@ async function saveRebuiltIndex(
   const db = await openDatabase();
 
   return new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction([DOCUMENT_STORE, CHUNK_STORE], "readwrite");
-    const chunkStore = transaction.objectStore(CHUNK_STORE);
-    chunks.forEach((chunk) => chunkStore.put(chunk));
+    const transaction = db.transaction([KNOWLEDGE_DOCUMENT_STORE, KNOWLEDGE_CHUNK_STORE, KNOWLEDGE_TERM_INDEX_STORE], "readwrite");
+    const chunkStore = transaction.objectStore(KNOWLEDGE_CHUNK_STORE);
+    const termStore = transaction.objectStore(KNOWLEDGE_TERM_INDEX_STORE);
+    const termRequest = termStore.index("spaceId").openKeyCursor(IDBKeyRange.only(spaceId));
+    termRequest.onsuccess = () => {
+      const cursor = termRequest.result;
+      if (!cursor) {
+        chunks.forEach((chunk) => {
+          chunkStore.put(chunk);
+          createTermIndexRecords(chunk).forEach((record) => termStore.put(record));
+        });
+        return;
+      }
+      termStore.delete(cursor.primaryKey);
+      cursor.continue();
+    };
 
-    const documentStore = transaction.objectStore(DOCUMENT_STORE);
+    const documentStore = transaction.objectStore(KNOWLEDGE_DOCUMENT_STORE);
     const documentRequest = documentStore.index("spaceId").openCursor(IDBKeyRange.only(spaceId));
     documentRequest.onsuccess = () => {
       const cursor = documentRequest.result;
@@ -536,7 +664,94 @@ async function saveRebuiltIndex(
   });
 }
 
-function createChunks(text: string) {
+
+function createTermIndexRecords(chunk: KnowledgeChunk): KnowledgeTermIndexRecord[] {
+  return [...new Set(chunk.terms)].map((term) => ({
+    id: `${chunk.spaceId}:${term}:${chunk.id}`,
+    spaceId: chunk.spaceId,
+    term,
+    chunkId: chunk.id,
+  }));
+}
+
+function deleteTermIndexForChunk(termStore: IDBObjectStore, chunkId: string) {
+  const request = termStore.index("chunkId").openKeyCursor(IDBKeyRange.only(chunkId));
+  request.onsuccess = () => {
+    const cursor = request.result;
+    if (!cursor) {
+      return;
+    }
+    termStore.delete(cursor.primaryKey);
+    cursor.continue();
+  };
+}
+
+async function collectCandidateChunkIds(
+  termStore: IDBObjectStore,
+  spaceId: string,
+  queryTerms: string[],
+  limit: number,
+): Promise<string[]> {
+  if (!queryTerms.length) {
+    return [];
+  }
+
+  const scores = new Map<string, number>();
+  await Promise.all(queryTerms.map((term) => collectTermMatches(termStore, spaceId, term, scores)));
+  return [...scores.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, limit)
+    .map(([chunkId]) => chunkId);
+}
+
+function collectTermMatches(
+  termStore: IDBObjectStore,
+  spaceId: string,
+  term: string,
+  scores: Map<string, number>,
+) {
+  return new Promise<void>((resolve, reject) => {
+    const request = termStore.index("spaceTerm").openCursor(IDBKeyRange.only([spaceId, term]));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+      const record = cursor.value as KnowledgeTermIndexRecord;
+      scores.set(record.chunkId, (scores.get(record.chunkId) ?? 0) + Math.min(term.length, 8));
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error ?? new Error("Failed to collect knowledge term matches."));
+  });
+}
+
+async function readCandidateChunks(chunkStore: IDBObjectStore, spaceId: string, candidateIds: string[]) {
+  if (!candidateIds.length) {
+    return readAllChunksForSpace(chunkStore, spaceId);
+  }
+
+  const chunks = await Promise.all(candidateIds.map((chunkId) => readChunk(chunkStore, chunkId)));
+  return chunks.filter((chunk): chunk is KnowledgeChunk => Boolean(chunk));
+}
+
+function readChunk(chunkStore: IDBObjectStore, chunkId: string) {
+  return new Promise<KnowledgeChunk | undefined>((resolve, reject) => {
+    const request = chunkStore.get(chunkId);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Failed to read knowledge chunk."));
+  });
+}
+
+function readAllChunksForSpace(chunkStore: IDBObjectStore, spaceId: string) {
+  return new Promise<KnowledgeChunk[]>((resolve, reject) => {
+    const request = chunkStore.index("spaceId").getAll(spaceId);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error ?? new Error("Failed to read knowledge chunks."));
+  });
+}
+
+export function createChunks(text: string) {
   const normalized = text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   if (!normalized) {
     return [];
@@ -545,18 +760,102 @@ function createChunks(text: string) {
   const chunks: string[] = [];
   let buffer = "";
 
-  for (const paragraph of normalized.split(/\n\s*\n/)) {
-    if ((buffer + "\n\n" + paragraph).trim().length > MAX_CHUNK_LENGTH && buffer) {
-      chunks.push(buffer.trim());
-      buffer = buffer.slice(-CHUNK_OVERLAP);
+  const flushBuffer = (keepOverlap = true) => {
+    const chunk = buffer.trim();
+    if (chunk) {
+      chunks.push(chunk);
+      buffer = keepOverlap ? chunk.slice(-CHUNK_OVERLAP) : "";
     }
-    buffer = `${buffer}\n\n${paragraph}`.trim();
+  };
+
+  const appendPiece = (piece: string) => {
+    const normalizedPiece = piece.trim();
+    if (!normalizedPiece) {
+      return;
+    }
+
+    const candidate = `${buffer}\n\n${normalizedPiece}`.trim();
+    if (candidate.length <= MAX_CHUNK_LENGTH) {
+      buffer = candidate;
+      return;
+    }
+
+    if (buffer) {
+      flushBuffer(true);
+    }
+
+    const overlappedCandidate = `${buffer}\n\n${normalizedPiece}`.trim();
+    if (overlappedCandidate.length <= MAX_CHUNK_LENGTH) {
+      buffer = overlappedCandidate;
+      return;
+    }
+
+    if (buffer.trim()) {
+      flushBuffer(false);
+    }
+    buffer = normalizedPiece;
+  };
+
+  for (const paragraph of normalized.split(/\n\s*\n/)) {
+    for (const piece of splitOversizedParagraph(paragraph.trim())) {
+      if (piece.length > MAX_CHUNK_LENGTH) {
+        if (buffer.trim()) {
+          flushBuffer(false);
+        }
+        chunks.push(...splitBySlidingWindow(piece));
+        buffer = chunks.at(-1)?.slice(-CHUNK_OVERLAP) ?? "";
+      } else {
+        appendPiece(piece);
+      }
+    }
   }
 
-  if (buffer) {
+  if (buffer.trim() && buffer.trim() !== chunks.at(-1)?.slice(-CHUNK_OVERLAP)) {
     chunks.push(buffer.trim());
   }
 
+  return chunks;
+}
+
+function splitOversizedParagraph(paragraph: string) {
+  if (paragraph.length <= MAX_CHUNK_LENGTH) {
+    return [paragraph];
+  }
+
+  const sentences = paragraph
+    .split(/(?<=[。！？!?；;.!?])\s*/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  if (sentences.length <= 1) {
+    return [paragraph];
+  }
+
+  const pieces: string[] = [];
+  let buffer = "";
+  for (const sentence of sentences) {
+    const candidate = `${buffer}${buffer ? " " : ""}${sentence}`.trim();
+    if (candidate.length > MAX_CHUNK_LENGTH && buffer) {
+      pieces.push(buffer);
+      buffer = `${buffer.slice(-CHUNK_OVERLAP)} ${sentence}`.trim();
+    } else {
+      buffer = candidate;
+    }
+  }
+
+  if (buffer) {
+    pieces.push(buffer);
+  }
+
+  return pieces;
+}
+
+function splitBySlidingWindow(text: string) {
+  const chunks: string[] = [];
+  const step = Math.max(MAX_CHUNK_LENGTH - CHUNK_OVERLAP, 1);
+  for (let start = 0; start < text.length; start += step) {
+    chunks.push(text.slice(start, start + MAX_CHUNK_LENGTH));
+  }
   return chunks;
 }
 

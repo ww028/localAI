@@ -14,7 +14,8 @@
     "test:prompt": "node --test tests/assistantPrompt.test.mjs",
     "test:intent": "node --test tests/assistantIntent.test.mjs",
     "test:planner": "node --test tests/assistantPlanner.test.mjs",
-    "test:executor": "node --test tests/assistantDeterministicExecutor.test.mjs"
+    "test:executor": "node --test tests/assistantDeterministicExecutor.test.mjs",
+    "eval": "node scripts/run-evals.mjs"
   },
   "keywords": [
     "chrome",
